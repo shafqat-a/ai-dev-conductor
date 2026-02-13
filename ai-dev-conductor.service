@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Dev Conductor - Web Terminal Manager
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ai-dev-conductor
+WorkingDirectory=/var/lib/ai-dev-conductor
+User=ai-conductor
+Group=ai-conductor
+EnvironmentFile=-/etc/ai-dev-conductor/env
+
+Restart=on-failure
+RestartSec=3s
+WatchdogSec=30s
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ai-dev-conductor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

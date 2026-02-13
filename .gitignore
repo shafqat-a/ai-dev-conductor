@@ -22,6 +22,9 @@ go.work.sum
 *.swp
 *.swo
 
+# Session data
+data/
+
 # OS
 .DS_Store
 Thumbs.db
