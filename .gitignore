@@ -22,6 +22,10 @@ go.work.sum
 *.swp
 *.swo
 
+# Runtime files
+ai-dev-conductor.log
+ai-dev-conductor.pid
+
 # Session data
 data/
 
