@@ -53,6 +53,15 @@ Reconnection is **not** attempted when:
 - The user manually disconnects (switches sessions, deletes session, navigates away)
 - The user connects to a different session
 
+## Binary Data Passthrough
+
+The WebSocket connection supports both text (JSON) and binary frames:
+
+- **Text frames**: JSON messages for `input`, `output`, and `resize` events
+- **Binary frames**: Raw bytes written directly to the PTY
+
+This enables pasting images and other binary clipboard content into programs running in the terminal (e.g. Claude Code, vim). The frontend uses xterm.js `onBinary` to capture non-UTF8 clipboard data and sends it as a binary WebSocket message. The server writes binary frames directly to the shell's PTY without JSON wrapping.
+
 ## HTTP Server Timeouts
 
 ```go
