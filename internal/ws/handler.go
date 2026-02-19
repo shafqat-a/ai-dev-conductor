@@ -68,9 +68,15 @@ func readPump(conn *websocket.Conn, sess *session.Session, client *session.Clien
 	})
 
 	for {
-		_, raw, err := conn.ReadMessage()
+		msgType, raw, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		// Binary messages are raw PTY input (e.g. image paste)
+		if msgType == websocket.BinaryMessage {
+			sess.WriteInput(raw)
+			continue
 		}
 
 		var msg Message

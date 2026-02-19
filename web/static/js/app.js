@@ -448,6 +448,17 @@ class TerminalManager {
             }
         });
 
+        // Handle binary data (e.g. image paste, non-UTF8 clipboard content)
+        this.term.onBinary((data) => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                const buffer = new Uint8Array(data.length);
+                for (let i = 0; i < data.length; i++) {
+                    buffer[i] = data.charCodeAt(i) & 0xff;
+                }
+                this.ws.send(buffer);
+            }
+        });
+
         this.openWebSocket(serverId, sessionId);
     }
 
