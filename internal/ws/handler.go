@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -50,11 +51,11 @@ func HandleWebSocket(mgr *session.Manager) http.HandlerFunc {
 		}
 
 		go writePump(conn, client)
-		go readPump(conn, sess, client)
+		go readPump(conn, sess, client, mgr.DataDir())
 	}
 }
 
-func readPump(conn *websocket.Conn, sess *session.Session, client *session.Client) {
+func readPump(conn *websocket.Conn, sess *session.Session, client *session.Client, dataDir string) {
 	defer func() {
 		sess.RemoveClient(client)
 		conn.Close()
@@ -90,6 +91,15 @@ func readPump(conn *websocket.Conn, sess *session.Session, client *session.Clien
 		case MessageTypeResize:
 			if msg.Cols > 0 && msg.Rows > 0 {
 				sess.Resize(msg.Rows, msg.Cols)
+			}
+		case MessageTypePasteImage:
+			img, err := base64.StdEncoding.DecodeString(msg.Data)
+			if err != nil {
+				log.Printf("session %s: bad paste-image data: %v", sess.ID, err)
+				continue
+			}
+			if err := sess.PasteImage(img, msg.Mime, dataDir); err != nil {
+				log.Printf("session %s: paste image failed: %v", sess.ID, err)
 			}
 		}
 	}

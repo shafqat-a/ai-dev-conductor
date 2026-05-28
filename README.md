@@ -8,7 +8,7 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Multi-server support** — Manage sessions across multiple remote instances from a single UI
 - **Real-time streaming** — WebSocket-based terminal I/O with xterm.js
 - **Session persistence** — Output history saved to disk and replayed on reconnect
-- **Binary data support** — Full binary passthrough for clipboard paste (images, non-UTF8 data)
+- **Image paste** — Ctrl+V of a clipboard image is delivered to the server's clipboard (or a file) so terminal programs like Claude Code can read it
 - **Auto-reconnect** — Exponential backoff reconnection on connection loss
 - **Authentication** — Bcrypt password hashing with session tokens (cookie + header)
 - **Production-ready** — Systemd service, health checks, graceful shutdown, dead session cleanup
@@ -90,12 +90,30 @@ main.go                    Entry point, HTTP server, routing (chi)
 Messages are JSON over text frames:
 
 ```json
-{"type": "input",  "data": "ls -la\n"}
-{"type": "output", "data": "total 42\n..."}
-{"type": "resize", "cols": 120, "rows": 40}
+{"type": "input",       "data": "ls -la\n"}
+{"type": "output",      "data": "total 42\n..."}
+{"type": "resize",      "cols": 120, "rows": 40}
+{"type": "paste-image", "mime": "image/png", "data": "<base64>"}
 ```
 
-Binary WebSocket frames are written directly to the PTY — this supports pasting images and other binary clipboard content into programs running in the terminal (e.g. Claude Code).
+### Image paste
+
+A native terminal pastes only text; an image has no text representation, so
+xterm.js sends nothing for it. To support image paste, the frontend intercepts
+the browser `paste` event, base64-encodes the image, and sends a `paste-image`
+message. The server then:
+
+1. **Primary:** writes the image to the system clipboard (`wl-copy` on Wayland,
+   `xclip` on X11) and sends `Ctrl+V` (`0x16`) to the PTY, so a clipboard-aware
+   program such as **Claude Code** reads the image from the clipboard — exactly
+   as it would locally.
+2. **Fallback** (headless server with no `$DISPLAY`/`$WAYLAND_DISPLAY` or no
+   clipboard tool): saves the image under `<data-dir>/<session>/pastes/` and
+   types its absolute path into the terminal so the program can read it from
+   disk.
+
+For the primary path on a headless box, run the server under a virtual display
+(e.g. `xvfb-run`) with `xclip` installed.
 
 ## Multi-Server
 

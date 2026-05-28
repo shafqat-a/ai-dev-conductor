@@ -23,6 +23,10 @@ class TerminalManager {
         document.getElementById('btn-add-server').addEventListener('click', () => this.addServer());
         window.addEventListener('resize', () => this.handleResize());
 
+        // Registered once: the container element is reused across sessions, so
+        // attaching per-connect would stack duplicate handlers.
+        this.containerEl.addEventListener('paste', (e) => this.handlePaste(e), true);
+
         this.loadAllSessions();
     }
 
@@ -448,7 +452,7 @@ class TerminalManager {
             }
         });
 
-        // Handle binary data (e.g. image paste, non-UTF8 clipboard content)
+        // Handle terminal-generated binary reports (DSR, etc.) as raw PTY input.
         this.term.onBinary((data) => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 const buffer = new Uint8Array(data.length);
@@ -458,6 +462,10 @@ class TerminalManager {
                 this.ws.send(buffer);
             }
         });
+
+        // Clipboard image paste is intercepted by the document-level handler
+        // registered in the constructor (xterm.js only pastes text/plain, so an
+        // image never reaches the PTY on its own).
 
         this.openWebSocket(serverId, sessionId);
     }
@@ -580,6 +588,39 @@ class TerminalManager {
                 rows: this.term.rows,
             }));
         }
+    }
+
+    // Capture-phase paste handler. Image clipboard content is sent to the
+    // server; text paste is left for xterm.js to handle normally.
+    handlePaste(e) {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+
+        for (const item of items) {
+            if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                const blob = item.getAsFile();
+                if (!blob) return;
+
+                const reader = new FileReader();
+                reader.onload = () => {
+                    // reader.result is "data:<mime>;base64,<payload>"
+                    const base64 = String(reader.result).split(',')[1] || '';
+                    if (base64 && this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({
+                            type: 'paste-image',
+                            mime: blob.type || item.type,
+                            data: base64,
+                        }));
+                    }
+                };
+                reader.readAsDataURL(blob);
+                return; // only the first image
+            }
+        }
+        // No image present: let the event continue to xterm's text paste.
     }
 
     // --- Utilities ---
