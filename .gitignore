@@ -25,6 +25,7 @@ go.work.sum
 # Runtime files (production and test instances)
 ai-dev-conductor*.log
 ai-dev-conductor*.pid
+restart-prod.log
 
 # Session data
 data/
