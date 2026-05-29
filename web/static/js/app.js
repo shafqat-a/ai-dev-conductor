@@ -725,6 +725,17 @@ class TerminalManager {
         const server = this.getServerById(serverId);
         if (!server) return;
 
+        // Tear down any existing socket first. A reconnect race could otherwise
+        // leave the previous socket open with its onmessage closure still live;
+        // both sockets then write to the same terminal, doubling every byte of
+        // output (e.g. a pasted image path appears twice).
+        if (this.ws) {
+            const stale = this.ws;
+            stale.onopen = stale.onmessage = stale.onclose = stale.onerror = null;
+            try { stale.close(); } catch (_) { /* already closing */ }
+            this.ws = null;
+        }
+
         // A reconnect makes the server re-seed the full scrollback snapshot. Clear
         // the stale buffer once the new socket opens so that snapshot replaces the
         // existing content instead of stacking a duplicate copy on top of it.
@@ -740,9 +751,11 @@ class TerminalManager {
             wsUrl = protocol + '//' + url.host + '/ws/' + sessionId + '?token=' + encodeURIComponent(server.token || '');
         }
 
-        this.ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl);
+        this.ws = ws;
 
-        this.ws.onopen = () => {
+        ws.onopen = () => {
+            if (this.ws !== ws) return; // superseded by a newer socket
             // Reset only on a successful reconnect (the initial connect already has
             // a fresh terminal). Done here, not in attemptReconnect, so the
             // "[Reconnecting…]" notices stay visible until the attach actually lands.
@@ -753,7 +766,8 @@ class TerminalManager {
             this.sendResize();
         };
 
-        this.ws.onmessage = (event) => {
+        ws.onmessage = (event) => {
+            if (this.ws !== ws) return; // ignore output from a stale socket
             try {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'output') {
@@ -764,14 +778,15 @@ class TerminalManager {
             }
         };
 
-        this.ws.onclose = () => {
+        ws.onclose = () => {
+            if (this.ws !== ws) return; // a newer socket already owns the session
             if (this.manualDisconnect || this.currentSessionId !== sessionId || this.currentServerId !== serverId) {
                 return;
             }
             this.attemptReconnect(serverId, sessionId);
         };
 
-        this.ws.onerror = () => {
+        ws.onerror = () => {
             // onclose will fire after this, reconnect handled there
         };
     }
