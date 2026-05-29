@@ -34,6 +34,10 @@ type Session struct {
 	// Atomic so readPTY can update it on the hot path without taking mu.
 	lastActivity atomic.Int64
 
+	// clientGoneAt is the UnixNano time since which the session has had zero
+	// clients (0 while at least one client is attached). Drives idle reaping.
+	clientGoneAt atomic.Int64
+
 	OnProcessExit func(id string)
 	// OnClientsEmpty fires when the last attached client disconnects.
 	OnClientsEmpty func(id string)
@@ -72,6 +76,7 @@ func NewSession(id, name, shell, dataDir string) (*Session, error) {
 		done:        make(chan struct{}),
 	}
 	s.lastActivity.Store(s.CreatedAt.Unix())
+	s.clientGoneAt.Store(s.CreatedAt.UnixNano()) // idle from birth until first attach
 
 	go s.readPTY()
 	go s.waitProcess()
@@ -136,8 +141,11 @@ func (s *Session) AddClient() *Client {
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
 
-	if first && s.OnClientsAttach != nil {
-		s.OnClientsAttach(s.ID)
+	if first {
+		s.clientGoneAt.Store(0) // active: at least one client attached
+		if s.OnClientsAttach != nil {
+			s.OnClientsAttach(s.ID)
+		}
 	}
 	return c
 }
@@ -150,9 +158,22 @@ func (s *Session) RemoveClient(c *Client) {
 	s.mu.Unlock()
 	close(c.done)
 
-	if empty && s.OnClientsEmpty != nil {
-		s.OnClientsEmpty(s.ID)
+	if empty {
+		s.clientGoneAt.Store(time.Now().UnixNano())
+		if s.OnClientsEmpty != nil {
+			s.OnClientsEmpty(s.ID)
+		}
 	}
+}
+
+// IdleDuration reports how long the session has had zero clients. It returns
+// -1 while at least one client is attached.
+func (s *Session) IdleDuration() time.Duration {
+	cg := s.clientGoneAt.Load()
+	if cg == 0 {
+		return -1
+	}
+	return time.Since(time.Unix(0, cg))
 }
 
 // Output returns the channel that receives PTY output for this client.

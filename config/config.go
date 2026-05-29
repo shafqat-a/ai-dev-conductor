@@ -20,6 +20,10 @@ type Config struct {
 	LoginMaxAttempts int
 	LoginWindow      time.Duration
 	LoginLockout     time.Duration
+
+	// Session lifecycle. IdleTimeout <= 0 disables reaping; MaxSessions <= 0 is unlimited.
+	IdleTimeout time.Duration
+	MaxSessions int
 }
 
 func Load() (*Config, error) {
@@ -33,6 +37,8 @@ func Load() (*Config, error) {
 		LoginMaxAttempts: envInt("AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS", 5),
 		LoginWindow:      envDuration("AI_CONDUCTOR_LOGIN_WINDOW", time.Minute),
 		LoginLockout:     envDuration("AI_CONDUCTOR_LOGIN_LOCKOUT", time.Minute),
+		IdleTimeout:      envDuration("AI_CONDUCTOR_IDLE_TIMEOUT", 0),
+		MaxSessions:      envInt("AI_CONDUCTOR_MAX_SESSIONS", 0),
 	}
 
 	if cfg.Shell == "" {

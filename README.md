@@ -51,6 +51,8 @@ All settings via environment variables:
 | `AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS` | `5` | Failed logins per IP before lockout (`0` disables throttling) |
 | `AI_CONDUCTOR_LOGIN_WINDOW` | `1m` | Window in which failures are counted |
 | `AI_CONDUCTOR_LOGIN_LOCKOUT` | `1m` | Base lockout, doubling per repeat offence (capped at 16×) |
+| `AI_CONDUCTOR_IDLE_TIMEOUT` | *(off)* | Reap sessions with no clients for this long (e.g. `2h`); `0` disables |
+| `AI_CONDUCTOR_MAX_SESSIONS` | *(unlimited)* | Cap on concurrent live sessions; `0` is unlimited |
 
 ### Login brute-force protection
 
