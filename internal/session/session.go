@@ -13,8 +13,15 @@ import (
 
 // Client represents a connected output consumer.
 type Client struct {
-	ch   chan []byte
-	done chan struct{}
+	ch        chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// closeDone closes the done channel exactly once, making it safe to call from
+// both RemoveClient (per-connection cleanup) and Session.Close (session teardown).
+func (c *Client) closeDone() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 type Session struct {
@@ -156,7 +163,7 @@ func (s *Session) RemoveClient(c *Client) {
 	delete(s.clients, c)
 	empty := len(s.clients) == 0
 	s.mu.Unlock()
-	close(c.done)
+	c.closeDone()
 
 	if empty {
 		s.clientGoneAt.Store(time.Now().UnixNano())
@@ -239,7 +246,7 @@ func (s *Session) Close() {
 
 	s.mu.Lock()
 	for c := range s.clients {
-		close(c.done)
+		c.closeDone()
 	}
 	s.clients = make(map[*Client]struct{})
 	s.mu.Unlock()
