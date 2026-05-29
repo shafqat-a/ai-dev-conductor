@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"html/template"
@@ -56,11 +57,72 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 
-	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir, metaStore, cfg.IdleTimeout, cfg.MaxSessions)
+	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir, metaStore, cfg.IdleTimeout, cfg.MaxSessions, true)
 
 	// Parse templates — use fs.Sub to strip prefix so template names are just "login.html" etc.
 	templateSub, _ := fs.Sub(templateFS, "web/templates")
 	tmpl := template.Must(template.ParseFS(templateSub, "*.html"))
+
+	// pageData is handed to every HTML template so client-side asset, API and
+	// WebSocket URLs can be prefixed with the base path when the app is served
+	// under a reverse-proxy subpath (e.g. /terminaltest).
+	pageData := map[string]any{"BasePath": cfg.BasePath}
+
+	staticSub, _ := fs.Sub(staticFS, "web/static")
+
+	// mountRoutes registers every route relative to the mount point. It is mounted
+	// either at the host root or under cfg.BasePath; http.StripPrefix uses the full
+	// public path because r.URL.Path still carries the base prefix.
+	mountRoutes := func(r chi.Router) {
+		// Static files
+		r.Handle("/static/*", http.StripPrefix(cfg.BasePath+"/static/", http.FileServer(http.FS(staticSub))))
+
+		// Public routes
+		r.Get("/api/health", api.HandleHealthCheck())
+		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			tmpl.ExecuteTemplate(w, "login.html", pageData)
+		})
+		r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, loginLimiter, cfg.SessionTimeout, cfg.BasePath))
+
+		// Public read-only share link: viewer page + its unauthenticated WS attach.
+		// The token in the URL is the only secret; both routes validate it server-side.
+		r.Get("/s/{token}", func(w http.ResponseWriter, r *http.Request) {
+			token := chi.URLParam(r, "token")
+			st := sessionMgr.Store()
+			valid := false
+			if st != nil {
+				sum := sha256.Sum256([]byte(token))
+				if _, _, ok, err := st.RedeemShare(sum[:], time.Now().Unix()); err == nil && ok {
+					valid = true
+				}
+			}
+			if !valid {
+				w.WriteHeader(http.StatusNotFound)
+				tmpl.ExecuteTemplate(w, "share_invalid.html", pageData)
+				return
+			}
+			tmpl.ExecuteTemplate(w, "share.html", pageData)
+		})
+		r.Get("/ws/share/{token}", ws.HandleShareWebSocket(sessionMgr))
+
+		// Protected routes
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireAuth(sessionStore, cfg.BasePath))
+
+			r.Get("/terminal", func(w http.ResponseWriter, r *http.Request) {
+				tmpl.ExecuteTemplate(w, "terminal.html", pageData)
+			})
+
+			r.Get("/api/sessions", api.HandleListSessions(sessionMgr))
+			r.Post("/api/sessions", api.HandleCreateSession(sessionMgr))
+			r.Put("/api/sessions/{id}", api.HandleRenameSession(sessionMgr))
+			r.Delete("/api/sessions/{id}", api.HandleDeleteSession(sessionMgr))
+			r.Post("/api/sessions/{id}/share", api.HandleMintShare(sessionMgr, cfg.PublicURL, cfg.ShareTTL))
+			r.Get("/api/sessions/{id}/shares", api.HandleListShares(sessionMgr))
+			r.Delete("/api/shares/{id}", api.HandleRevokeShare(sessionMgr))
+			r.Get("/ws/{id}", ws.HandleWebSocket(sessionMgr))
+		})
+	}
 
 	// Router
 	r := chi.NewRouter()
@@ -68,31 +130,15 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(corsMiddleware)
 
-	// Static files
-	staticSub, _ := fs.Sub(staticFS, "web/static")
-	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
-
-	// Public routes
-	r.Get("/api/health", api.HandleHealthCheck())
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		tmpl.ExecuteTemplate(w, "login.html", nil)
-	})
-	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, loginLimiter, cfg.SessionTimeout))
-
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		r.Use(auth.RequireAuth(sessionStore))
-
-		r.Get("/terminal", func(w http.ResponseWriter, r *http.Request) {
-			tmpl.ExecuteTemplate(w, "terminal.html", nil)
+	if cfg.BasePath == "" {
+		mountRoutes(r)
+	} else {
+		// Bare prefix with no trailing slash → send the browser to the login page.
+		r.Get(cfg.BasePath, func(w http.ResponseWriter, req *http.Request) {
+			http.Redirect(w, req, cfg.BasePath+"/", http.StatusMovedPermanently)
 		})
-
-		r.Get("/api/sessions", api.HandleListSessions(sessionMgr))
-		r.Post("/api/sessions", api.HandleCreateSession(sessionMgr))
-		r.Put("/api/sessions/{id}", api.HandleRenameSession(sessionMgr))
-		r.Delete("/api/sessions/{id}", api.HandleDeleteSession(sessionMgr))
-		r.Get("/ws/{id}", ws.HandleWebSocket(sessionMgr))
-	})
+		r.Route(cfg.BasePath, mountRoutes)
+	}
 
 	// Server with graceful shutdown
 	srv := &http.Server{
@@ -113,9 +159,10 @@ func main() {
 
 	go func() {
 		log.Printf("Shell: %s", cfg.Shell)
+		log.Printf("Session backend: tmux (%s) — sessions survive restart", cfg.TmuxBin)
 		log.Printf("Listening on %s", cfg.ListenAddr)
 		for _, addr := range getAccessURLs(cfg.ListenAddr) {
-			log.Printf("  -> %s", addr)
+			log.Printf("  -> %s%s/", addr, cfg.BasePath)
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)

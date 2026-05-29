@@ -213,6 +213,61 @@ body {
     background: #f7768e22;
 }
 
+.session-item .btn-share {
+    background: none;
+    border: none;
+    color: #565f89;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    transition: color 0.2s, background 0.2s;
+    flex-shrink: 0;
+}
+
+.session-item .btn-share:hover {
+    color: #9ece6a;
+    background: #9ece6a22;
+}
+
+/* Share-link modal */
+.modal-desc {
+    font-size: 0.8125rem;
+    color: var(--text);
+    opacity: 0.8;
+    line-height: 1.5;
+    margin-bottom: 14px;
+}
+
+.share-link-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.share-link-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8125rem;
+}
+
+.btn-copy {
+    flex-shrink: 0;
+    padding: 8px 14px;
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
 /* Server picker dropdown */
 .server-picker {
     position: absolute;

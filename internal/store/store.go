@@ -53,7 +53,18 @@ CREATE TABLE IF NOT EXISTS sessions_meta (
   cols                       INTEGER NOT NULL DEFAULT 0,
   rows                       INTEGER NOT NULL DEFAULT 0,
   status                     TEXT    NOT NULL DEFAULT 'running'
-);`
+);
+
+CREATE TABLE IF NOT EXISTS share_links (
+  id          TEXT PRIMARY KEY,                 -- short public handle for list/revoke
+  token_hash  BLOB NOT NULL UNIQUE,             -- sha256 of the raw token (the URL secret)
+  session_id  TEXT NOT NULL,
+  mode        TEXT NOT NULL DEFAULT 'read',
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  revoked     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_share_links_session ON share_links(session_id);`
 
 // Open opens (creating if needed) the SQLite database at path and applies the
 // schema. Use ":memory:" for tests.
@@ -168,6 +179,70 @@ func (s *Store) List() ([]SessionMeta, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// ShareLink is a public, time-boxed, read-only link to a session.
+type ShareLink struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	Mode      string `json:"mode"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
+	Revoked   bool   `json:"revoked"`
+}
+
+// MintShare records a new share link. tokenHash is sha256 of the raw token
+// (the URL secret); only the hash is stored.
+func (s *Store) MintShare(id string, tokenHash []byte, sessionID, mode string, createdAt, expiresAt int64) error {
+	_, err := s.db.Exec(`
+		INSERT INTO share_links (id, token_hash, session_id, mode, created_at, expires_at, revoked)
+		VALUES (?, ?, ?, ?, ?, ?, 0)`,
+		id, tokenHash, sessionID, mode, createdAt, expiresAt)
+	return err
+}
+
+// RedeemShare resolves a token hash to its (sessionID, mode) if the link exists,
+// is not revoked, and has not expired.
+func (s *Store) RedeemShare(tokenHash []byte, now int64) (sessionID, mode string, ok bool, err error) {
+	row := s.db.QueryRow(`
+		SELECT session_id, mode FROM share_links
+		WHERE token_hash = ? AND revoked = 0 AND expires_at > ?`, tokenHash, now)
+	err = row.Scan(&sessionID, &mode)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return sessionID, mode, true, nil
+}
+
+// SharesForSession lists a session's share links (newest first).
+func (s *Store) SharesForSession(sessionID string) ([]ShareLink, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, mode, created_at, expires_at, revoked
+		FROM share_links WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ShareLink
+	for rows.Next() {
+		var sl ShareLink
+		var revoked int
+		if err := rows.Scan(&sl.ID, &sl.SessionID, &sl.Mode, &sl.CreatedAt, &sl.ExpiresAt, &revoked); err != nil {
+			return nil, err
+		}
+		sl.Revoked = revoked != 0
+		out = append(out, sl)
+	}
+	return out, rows.Err()
+}
+
+// RevokeShare marks a share link revoked by its public id.
+func (s *Store) RevokeShare(id string) error {
+	_, err := s.db.Exec(`UPDATE share_links SET revoked = 1 WHERE id = ?`, id)
+	return err
 }
 
 // Close closes the underlying database.

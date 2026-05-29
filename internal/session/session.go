@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"log"
 	"os"
 	"os/exec"
@@ -13,8 +14,15 @@ import (
 
 // Client represents a connected output consumer.
 type Client struct {
-	ch   chan []byte
-	done chan struct{}
+	ch        chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// closeDone closes the done channel exactly once, making it safe to call from
+// both RemoveClient (per-connection cleanup) and Session.Close (session teardown).
+func (c *Client) closeDone() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 type Session struct {
@@ -29,6 +37,13 @@ type Session struct {
 	historyFile *os.File
 	done        chan struct{}
 	cols, rows  uint16 // last known terminal size
+
+	// tmux-backed sessions wrap a detached tmux session so the shell survives a
+	// conductor restart. tmuxName is the tmux session name; dataDir locates both
+	// the history file (raw-PTY mode) and the tmux server socket (tmux mode).
+	tmux     bool
+	tmuxName string
+	dataDir  string
 
 	// lastActivity is the unix-seconds time of the most recent PTY output.
 	// Atomic so readPTY can update it on the hot path without taking mu.
@@ -45,38 +60,70 @@ type Session struct {
 	OnClientsAttach func(id string)
 }
 
-func NewSession(id, name, shell, dataDir string) (*Session, error) {
+// NewSession starts a fresh session. When useTmux is true the shell runs inside a
+// detached tmux session (surviving a conductor restart); otherwise it is a plain
+// PTY owned by this process.
+func NewSession(id, name, shell, dataDir string, useTmux bool) (*Session, error) {
+	return newSession(id, name, shell, dataDir, useTmux, time.Now())
+}
+
+// ReattachSession re-binds to an already-running tmux session after a restart,
+// preserving its original creation time. The tmux `new-session -A` is idempotent,
+// so this simply attaches to the surviving shell with its full scrollback intact.
+func ReattachSession(id, name, shell, dataDir string, createdAt time.Time) (*Session, error) {
+	return newSession(id, name, shell, dataDir, true, createdAt)
+}
+
+func newSession(id, name, shell, dataDir string, useTmux bool, createdAt time.Time) (*Session, error) {
 	if name == "" {
 		name = id
 	}
 
-	cmd := exec.Command(shell)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	var (
+		cmd    *exec.Cmd
+		hf     *os.File
+		tmuxNm string
+		err    error
+	)
+	if useTmux {
+		tmuxNm = tmuxName(id)
+		cmd = tmuxAttachCmd(dataDir, tmuxNm, shell)
+	} else {
+		cmd = exec.Command(shell)
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	}
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return nil, err
 	}
 
-	hf, err := OpenHistoryFile(dataDir, id)
-	if err != nil {
-		ptmx.Close()
-		cmd.Process.Kill()
-		return nil, err
+	// tmux owns scrollback (served via capture-pane on attach); only raw-PTY
+	// sessions need a history file, since they have nowhere else to replay from.
+	if !useTmux {
+		hf, err = OpenHistoryFile(dataDir, id)
+		if err != nil {
+			ptmx.Close()
+			cmd.Process.Kill()
+			return nil, err
+		}
 	}
 
 	s := &Session{
 		ID:          id,
 		Name:        name,
-		CreatedAt:   time.Now(),
+		CreatedAt:   createdAt,
 		ptmx:        ptmx,
 		cmd:         cmd,
 		clients:     make(map[*Client]struct{}),
 		historyFile: hf,
 		done:        make(chan struct{}),
+		tmux:        useTmux,
+		tmuxName:    tmuxNm,
+		dataDir:     dataDir,
 	}
-	s.lastActivity.Store(s.CreatedAt.Unix())
-	s.clientGoneAt.Store(s.CreatedAt.UnixNano()) // idle from birth until first attach
+	s.lastActivity.Store(createdAt.Unix())
+	s.clientGoneAt.Store(time.Now().UnixNano()) // idle from birth until first attach
 
 	go s.readPTY()
 	go s.waitProcess()
@@ -156,7 +203,7 @@ func (s *Session) RemoveClient(c *Client) {
 	delete(s.clients, c)
 	empty := len(s.clients) == 0
 	s.mu.Unlock()
-	close(c.done)
+	c.closeDone()
 
 	if empty {
 		s.clientGoneAt.Store(time.Now().UnixNano())
@@ -226,6 +273,43 @@ func (s *Session) GetName() string {
 	return s.Name
 }
 
+// Snapshot returns the output to seed a freshly-connected viewer: the tmux pane's
+// recent scrollback (CRLF-normalized) for tmux sessions, or the on-disk history
+// file for raw-PTY sessions.
+func (s *Session) Snapshot() []byte {
+	if s.tmux {
+		raw := tmuxCapturePane(s.dataDir, s.tmuxName, captureLines)
+		// capture-pane emits bare LFs; xterm needs CRLF or lines stair-step.
+		return bytes.ReplaceAll(raw, []byte("\n"), []byte("\r\n"))
+	}
+	data, _ := ReadHistory(s.dataDir, s.ID)
+	return data
+}
+
+// Detach releases this process's hold on the session without terminating the
+// shell. For tmux sessions the tmux server keeps the shell (and scrollback) alive
+// for reattachment after a restart. Raw-PTY sessions have nothing to preserve, so
+// this is equivalent to Close.
+func (s *Session) Detach() {
+	if !s.tmux {
+		s.Close()
+		return
+	}
+	if s.ptmx != nil {
+		s.ptmx.Close() // detaching the client; the tmux session lives on
+	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.cmd.Process.Kill()
+	}
+	s.mu.Lock()
+	for c := range s.clients {
+		c.closeDone()
+	}
+	s.clients = make(map[*Client]struct{})
+	s.mu.Unlock()
+	log.Printf("session %s detached (tmux session preserved)", s.ID)
+}
+
 func (s *Session) Close() {
 	if s.ptmx != nil {
 		s.ptmx.Close()
@@ -233,13 +317,18 @@ func (s *Session) Close() {
 	if s.cmd != nil && s.cmd.Process != nil {
 		s.cmd.Process.Kill()
 	}
+	if s.tmux {
+		if err := tmuxKillSession(s.dataDir, s.tmuxName); err != nil {
+			log.Printf("session %s: kill tmux session: %v", s.ID, err)
+		}
+	}
 	if s.historyFile != nil {
 		s.historyFile.Close()
 	}
 
 	s.mu.Lock()
 	for c := range s.clients {
-		close(c.done)
+		c.closeDone()
 	}
 	s.clients = make(map[*Client]struct{})
 	s.mu.Unlock()

@@ -18,7 +18,7 @@ func newLoginHandler(t *testing.T, maxAttempts int) http.HandlerFunc {
 	}
 	store := auth.NewSessionStore()
 	limiter := auth.NewRateLimiter(maxAttempts, time.Minute, time.Minute)
-	return HandleLogin(authSvc, store, limiter, time.Hour)
+	return HandleLogin(authSvc, store, limiter, time.Hour, "")
 }
 
 func postLogin(h http.HandlerFunc, ip, password string) *httptest.ResponseRecorder {

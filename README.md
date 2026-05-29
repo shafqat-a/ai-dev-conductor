@@ -7,7 +7,7 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Multi-session management** — Create, rename, and delete terminal sessions from a sidebar
 - **Multi-server support** — Manage sessions across multiple remote instances from a single UI
 - **Real-time streaming** — WebSocket-based terminal I/O with xterm.js
-- **Session persistence** — Output history saved to disk and replayed on reconnect
+- **Session survival** — Shells run in a detached tmux server and survive a conductor restart/crash; on boot the server reattaches each session with its full scrollback (tmux is a required dependency)
 - **Image paste** — Ctrl+V of a clipboard image is delivered to the server's clipboard (or a file) so terminal programs like Claude Code can read it
 - **Command palette & shortcuts** — `Ctrl/Cmd+K` palette; `Ctrl+Shift+]`/`[` cycle sessions; `Ctrl+Shift+N` new session
 - **Themes & fonts** — Switchable terminal themes (Tokyo Night, Dracula, Solarized, Light) and font size, saved per browser
@@ -15,9 +15,14 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Mobile-friendly** — On-screen Esc/Tab/Ctrl/arrow keys and a slide-in sidebar on small screens
 - **Auto-reconnect** — Exponential backoff reconnection on connection loss
 - **Authentication** — Bcrypt password hashing with session tokens (cookie + header)
+- **Read-only share links** — Mint a time-boxed public link (`/s/{token}`) that lets anyone watch a session live without controlling it; read-only is enforced server-side, and links can be revoked
 - **Production-ready** — Systemd service, health checks, graceful shutdown, dead session cleanup
 
 ## Quick Start
+
+> **Prerequisite:** `tmux` must be installed and on `PATH` — it backs every
+> session so shells survive restarts, and the server will not start without it
+> (`sudo apt install tmux` / `brew install tmux`).
 
 ```bash
 # Build
@@ -57,6 +62,9 @@ All settings via environment variables:
 | `AI_CONDUCTOR_LOGIN_LOCKOUT` | `1m` | Base lockout, doubling per repeat offence (capped at 16×) |
 | `AI_CONDUCTOR_IDLE_TIMEOUT` | *(off)* | Reap sessions with no clients for this long (e.g. `2h`); `0` disables |
 | `AI_CONDUCTOR_MAX_SESSIONS` | *(unlimited)* | Cap on concurrent live sessions; `0` is unlimited |
+| `AI_CONDUCTOR_PUBLIC_URL` | *(request origin)* | External base URL (e.g. `https://host`) used to build absolute share-link URLs |
+| `AI_CONDUCTOR_SHARE_TTL` | `24h` | Default lifetime of a minted share link (capped at 30 days) |
+| `AI_CONDUCTOR_BASE_PATH` | *(none — host root)* | URL path prefix to serve under when behind a reverse-proxy subpath (e.g. `/terminaltest`). All routes, assets, cookies and WebSockets are scoped to it |
 
 ### Login brute-force protection
 
@@ -69,6 +77,55 @@ exponentially increasing duration and `/api/login` returns `429` with a
 ```
 auth: failed login attempt, ip=<ip>
 ```
+
+### Serving under a subpath
+
+By default the app owns the host root (`/`). To run it under a path prefix
+behind a reverse proxy — e.g. a staging instance at
+`https://home.cloudlabs.live/terminaltest` — set `AI_CONDUCTOR_BASE_PATH`. Every
+route, static asset, session cookie and WebSocket is then scoped to that prefix,
+and absolute share-link URLs are built from `AI_CONDUCTOR_PUBLIC_URL`:
+
+```bash
+AI_CONDUCTOR_ADDR=0.0.0.0:5051 \
+AI_CONDUCTOR_BASE_PATH=/terminaltest \
+AI_CONDUCTOR_PUBLIC_URL=https://home.cloudlabs.live/terminaltest \
+./ai-dev-conductor
+```
+
+Proxy the prefix through nginx **without rewriting the path** (no URI part on
+`proxy_pass`), so the app receives the full `/terminaltest/...` URL it expects:
+
+```nginx
+location /terminaltest {
+    proxy_pass http://127.0.0.1:5051;        # no trailing slash — path passed through
+    proxy_http_version 1.1;
+    proxy_set_header Host       $host;
+    proxy_set_header Upgrade    $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+    proxy_read_timeout 86400s;
+    proxy_buffering    off;
+}
+```
+
+`./run-test.sh {start|stop|status}` wraps exactly this for a port-5051 test
+instance with its own data dir and PID file, isolated from the production
+instance managed by `run.sh`.
+
+### Session survival across restarts
+
+**tmux is a required dependency** — the server refuses to start if `tmux` is not
+on `PATH`. Each session's shell runs inside a **detached tmux session** on a
+private server socket under the data dir (`<data-dir>/tmux.sock`). Because that
+tmux server is independent of the conductor process, shells keep running when the
+conductor is restarted or crashes. On boot the conductor enumerates surviving
+tmux sessions, reattaches each one, and seeds reconnecting viewers with the
+pane's scrollback (via `tmux capture-pane`). Deleting a session kills its tmux
+session; a graceful shutdown only detaches.
+
+Under **systemd**, set `KillMode=process` (already in the shipped unit) so a
+`systemctl restart` signals only the conductor and leaves the tmux server alive
+for reattach — the default `control-group` kill would otherwise tear it down.
 
 ## Architecture
 
@@ -104,7 +161,12 @@ main.go                    Entry point, HTTP server, routing (chi)
 | `POST` | `/api/sessions` | Yes | Create new session |
 | `PUT` | `/api/sessions/{id}` | Yes | Rename session |
 | `DELETE` | `/api/sessions/{id}` | Yes | Delete session |
+| `POST` | `/api/sessions/{id}/share` | Yes | Mint a read-only share link (raw token returned once); optional body `{"ttlSeconds": N}` |
+| `GET` | `/api/sessions/{id}/shares` | Yes | List a session's share links (metadata only) |
+| `DELETE` | `/api/shares/{id}` | Yes | Revoke a share link by its public id |
 | `GET` | `/ws/{id}` | Yes | WebSocket terminal connection |
+| `GET` | `/s/{token}` | No | Public read-only viewer page for a share link |
+| `GET` | `/ws/share/{token}` | No | Public read-only WebSocket attach (input dropped server-side) |
 
 ## WebSocket Protocol
 

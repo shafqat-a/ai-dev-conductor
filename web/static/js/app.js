@@ -57,6 +57,7 @@ class TerminalManager {
         this.term = null;
         this.fitAddon = null;
         this.manualDisconnect = false;
+        this.creatingSession = false;   // in-flight guard so one click makes one session
         this.reconnectAttempts = 0;
         this.reconnectTimer = null;
         this.maxReconnectAttempts = 20;
@@ -166,7 +167,9 @@ class TerminalManager {
     }
 
     getServerBaseUrl(server) {
-        if (server.isLocal || !server.url) return '';
+        // Local server requests are same-origin but must carry the app's base path
+        // (e.g. /terminaltest) when it's served under a reverse-proxy subpath.
+        if (server.isLocal || !server.url) return window.BASE_PATH || '';
         return server.url.replace(/\/$/, '');
     }
 
@@ -259,7 +262,7 @@ class TerminalManager {
                     const res = await this.fetchFromServer(server, '/api/sessions');
                     if (res.status === 401) {
                         if (server.isLocal) {
-                            window.location.href = '/';
+                            window.location.href = (window.BASE_PATH || '') + '/';
                             return [];
                         }
                         server.connected = false;
@@ -363,6 +366,15 @@ class TerminalManager {
                     this.renameSession(serverId, s.id, s.name || s.id);
                 });
 
+                const shareBtn = document.createElement('button');
+                shareBtn.className = 'btn-share';
+                shareBtn.title = 'Create read-only share link';
+                shareBtn.innerHTML = '&#128279;'; // 🔗
+                shareBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.shareSession(serverId, s.id);
+                });
+
                 const deleteBtn = document.createElement('button');
                 deleteBtn.className = 'btn-delete';
                 deleteBtn.title = 'Delete session';
@@ -373,6 +385,7 @@ class TerminalManager {
                 });
 
                 item.appendChild(nameSpan);
+                item.appendChild(shareBtn);
                 item.appendChild(renameBtn);
                 item.appendChild(deleteBtn);
                 this.sessionListEl.appendChild(item);
@@ -423,20 +436,29 @@ class TerminalManager {
     // --- Session CRUD ---
 
     async createSession() {
-        const connectedServers = this.servers.filter(s => s.connected !== false);
-
-        let targetServer;
-        if (connectedServers.length === 0) {
-            alert('No servers connected');
-            return;
-        } else if (connectedServers.length === 1) {
-            targetServer = connectedServers[0];
-        } else {
-            targetServer = await this.showServerPicker(connectedServers);
-            if (!targetServer) return;
-        }
+        // Guard against duplicate triggers for a single intent — mobile "ghost
+        // clicks" (a tap firing click twice), impatient double-clicks, or a click
+        // landing while a previous create is still in flight would otherwise each
+        // POST a new session, spawning several from one action.
+        if (this.creatingSession) return;
+        this.creatingSession = true;
+        const newSessionBtn = document.getElementById('btn-new-session');
+        if (newSessionBtn) newSessionBtn.disabled = true;
 
         try {
+            const connectedServers = this.servers.filter(s => s.connected !== false);
+
+            let targetServer;
+            if (connectedServers.length === 0) {
+                alert('No servers connected');
+                return;
+            } else if (connectedServers.length === 1) {
+                targetServer = connectedServers[0];
+            } else {
+                targetServer = await this.showServerPicker(connectedServers);
+                if (!targetServer) return;
+            }
+
             const res = await this.fetchFromServer(targetServer, '/api/sessions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -444,7 +466,7 @@ class TerminalManager {
             });
             if (res.status === 401) {
                 if (targetServer.isLocal) {
-                    window.location.href = '/';
+                    window.location.href = (window.BASE_PATH || '') + '/';
                 } else {
                     await this.authenticateServer(targetServer);
                 }
@@ -455,6 +477,9 @@ class TerminalManager {
             this.connectToSession(targetServer.id, data.id);
         } catch (err) {
             console.error('Failed to create session:', err);
+        } finally {
+            this.creatingSession = false;
+            if (newSessionBtn) newSessionBtn.disabled = false;
         }
     }
 
@@ -527,6 +552,99 @@ class TerminalManager {
         }
     }
 
+    async shareSession(serverId, sessionId) {
+        const server = this.getServerById(serverId);
+        if (!server) return;
+
+        try {
+            const res = await this.fetchFromServer(server, '/api/sessions/' + sessionId + '/share', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert('Could not create share link: ' + (err.error || res.status));
+                return;
+            }
+            const data = await res.json();
+
+            // The server returns an absolute URL only when AI_CONDUCTOR_PUBLIC_URL
+            // is set; otherwise it's a path we resolve against the server's origin.
+            let link = data.url || data.path;
+            if (link && !/^https?:\/\//i.test(link)) {
+                const base = server.isLocal ? window.location.origin + (window.BASE_PATH || '') : this.getServerBaseUrl(server);
+                link = base + link;
+            }
+            this.showShareLink(link, data.expiresAt);
+        } catch (err) {
+            console.error('Failed to create share link:', err);
+            alert('Could not create share link: ' + err.message);
+        }
+    }
+
+    // Read-only links are shown once; the raw token is never recoverable later.
+    showShareLink(link, expiresAt) {
+        this.closeOverlays();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'overlay';
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) this.closeOverlays(); });
+
+        const modal = document.createElement('div');
+        modal.className = 'overlay-panel';
+
+        const title = document.createElement('h2');
+        title.textContent = 'Read-only share link';
+
+        const desc = document.createElement('p');
+        desc.className = 'modal-desc';
+        const when = expiresAt ? new Date(expiresAt * 1000).toLocaleString() : 'a set time';
+        desc.textContent = 'Anyone with this link can watch (not control) the session until ' + when + '. Copy it now — it is shown only once.';
+
+        const row = document.createElement('div');
+        row.className = 'share-link-row';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = link;
+        input.className = 'share-link-input';
+        input.addEventListener('focus', () => input.select());
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn-copy';
+        copyBtn.textContent = 'Copy';
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(link);
+                copyBtn.textContent = 'Copied!';
+            } catch {
+                input.focus();
+                input.select();
+                copyBtn.textContent = 'Press Ctrl+C';
+            }
+            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+        });
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'overlay-close';
+        closeBtn.textContent = 'Done';
+        closeBtn.addEventListener('click', () => this.closeOverlays());
+
+        row.appendChild(input);
+        row.appendChild(copyBtn);
+        modal.appendChild(title);
+        modal.appendChild(desc);
+        modal.appendChild(row);
+        modal.appendChild(closeBtn);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+
+        input.focus();
+        input.select();
+    }
+
     // --- Terminal Connection ---
 
     connectToSession(serverId, sessionId) {
@@ -592,10 +710,15 @@ class TerminalManager {
         const server = this.getServerById(serverId);
         if (!server) return;
 
+        // A reconnect makes the server re-seed the full scrollback snapshot. Clear
+        // the stale buffer once the new socket opens so that snapshot replaces the
+        // existing content instead of stacking a duplicate copy on top of it.
+        const isReconnect = this.reconnectAttempts > 0;
+
         let wsUrl;
         if (server.isLocal) {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            wsUrl = protocol + '//' + window.location.host + '/ws/' + sessionId;
+            wsUrl = protocol + '//' + window.location.host + (window.BASE_PATH || '') + '/ws/' + sessionId;
         } else {
             const url = new URL(server.url);
             const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -605,6 +728,12 @@ class TerminalManager {
         this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
+            // Reset only on a successful reconnect (the initial connect already has
+            // a fresh terminal). Done here, not in attemptReconnect, so the
+            // "[Reconnecting…]" notices stay visible until the attach actually lands.
+            if (isReconnect && this.term) {
+                this.term.reset();
+            }
             this.reconnectAttempts = 0;
             this.sendResize();
         };
