@@ -3,9 +3,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -130,6 +134,114 @@ func HandleDeleteSession(mgr *session.Manager) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 	}
+}
+
+// HandleUpload writes an uploaded file into the session's current working
+// directory. The filename is reduced to its base name to block path traversal,
+// and the request body is capped at maxBytes (mirror this in nginx's
+// client_max_body_size when behind a proxy).
+func HandleUpload(mgr *session.Manager, maxBytes int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cwd, ok := sessionCWD(w, r, mgr)
+		if !ok {
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "upload too large or malformed"})
+			return
+		}
+		file, hdr, err := r.FormFile("file")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing file field"})
+			return
+		}
+		defer file.Close()
+
+		// Collapse to the base name so "../" or absolute paths in the client-supplied
+		// filename can never escape the working directory.
+		name := filepath.Base(filepath.Clean("/" + hdr.Filename))
+		if name == "." || name == "/" || strings.TrimSpace(name) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid filename"})
+			return
+		}
+		dest := filepath.Join(cwd, name)
+
+		out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cannot create file"})
+			return
+		}
+		defer out.Close()
+
+		n, err := io.Copy(out, file)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "write failed"})
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"name": name, "size": n})
+	}
+}
+
+// HandleDownload serves a file from within the session's working directory. The
+// requested ?path= is confined to the CWD: traversal outside it is rejected.
+func HandleDownload(mgr *session.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cwd, ok := sessionCWD(w, r, mgr)
+		if !ok {
+			return
+		}
+		rel := r.URL.Query().Get("path")
+		if rel == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+			return
+		}
+		full, err := confinedPath(cwd, rel)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "path outside working directory"})
+			return
+		}
+		info, err := os.Stat(full)
+		if err != nil || info.IsDir() {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(full)))
+		http.ServeFile(w, r, full)
+	}
+}
+
+// sessionCWD looks up the session named in the {id} route param and returns its
+// working directory, writing the appropriate error response and returning ok=false
+// if the session is missing or its CWD cannot be resolved.
+func sessionCWD(w http.ResponseWriter, r *http.Request, mgr *session.Manager) (string, bool) {
+	id := chi.URLParam(r, "id")
+	s, ok := mgr.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		return "", false
+	}
+	cwd, err := s.CWD()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "cannot resolve working directory"})
+		return "", false
+	}
+	return cwd, true
+}
+
+// confinedPath joins rel onto base and guarantees the result stays within base,
+// defeating "../" traversal and absolute-path escapes.
+func confinedPath(base, rel string) (string, error) {
+	full := filepath.Join(base, rel)
+	r, err := filepath.Rel(base, full)
+	if err != nil {
+		return "", err
+	}
+	if r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes base directory")
+	}
+	return full, nil
 }
 
 // clientIP resolves the originating client address. The app sits behind our

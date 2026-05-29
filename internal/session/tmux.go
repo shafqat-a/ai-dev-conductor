@@ -79,6 +79,18 @@ func tmuxListSessions(dataDir string) []string {
 	return ids
 }
 
+// tmuxPanePID returns the PID of the shell running in the session's pane. Used to
+// resolve the session's working directory via /proc/<pid>/cwd, since the conductor
+// only holds the tmux client process, not the shell itself.
+func tmuxPanePID(dataDir, name string) (int, error) {
+	args := append(tmuxBaseArgs(dataDir), "display-message", "-p", "-t", name, "#{pane_pid}")
+	out, err := exec.Command("tmux", args...).Output()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
+}
+
 // tmuxCapturePane returns the pane's recent scrollback (with SGR escapes) to seed
 // a newly-connected viewer. tmux emits LF-separated lines; callers convert to CRLF.
 func tmuxCapturePane(dataDir, name string, lines int) []byte {

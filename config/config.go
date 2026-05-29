@@ -37,6 +37,10 @@ type Config struct {
 	IdleTimeout time.Duration
 	MaxSessions int
 
+	// MaxUploadBytes caps the size of a single file uploaded to a session's working
+	// directory. Keep in sync with nginx client_max_body_size when behind a proxy.
+	MaxUploadBytes int64
+
 	// TmuxBin is the resolved path to the tmux executable. tmux is a hard
 	// requirement: every session runs inside a detached tmux session so it
 	// survives a conductor restart, and the server refuses to start without it.
@@ -56,6 +60,7 @@ func Load() (*Config, error) {
 		LoginLockout:     envDuration("AI_CONDUCTOR_LOGIN_LOCKOUT", time.Minute),
 		IdleTimeout:      envDuration("AI_CONDUCTOR_IDLE_TIMEOUT", 0),
 		MaxSessions:      envInt("AI_CONDUCTOR_MAX_SESSIONS", 0),
+		MaxUploadBytes:   envInt64("AI_CONDUCTOR_MAX_UPLOAD_BYTES", 100<<20), // 100 MiB
 		PublicURL:        strings.TrimRight(os.Getenv("AI_CONDUCTOR_PUBLIC_URL"), "/"),
 		ShareTTL:         envDuration("AI_CONDUCTOR_SHARE_TTL", 24*time.Hour),
 		BasePath:         normalizeBasePath(os.Getenv("AI_CONDUCTOR_BASE_PATH")),
@@ -126,6 +131,15 @@ func envOrDefault(key, fallback string) string {
 func envInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
 	}

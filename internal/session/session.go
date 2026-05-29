@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -284,6 +285,29 @@ func (s *Session) Snapshot() []byte {
 	}
 	data, _ := ReadHistory(s.dataDir, s.ID)
 	return data
+}
+
+// CWD returns the working directory of the session's shell, resolved via
+// /proc/<pid>/cwd (Linux only). For tmux sessions the shell is the tmux pane's
+// process; for raw-PTY sessions it is the directly-spawned shell. It reflects the
+// shell's current directory, so it tracks `cd` as the user navigates.
+func (s *Session) CWD() (string, error) {
+	pid, err := s.shellPID()
+	if err != nil {
+		return "", err
+	}
+	return os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+}
+
+// shellPID returns the PID of the interactive shell backing this session.
+func (s *Session) shellPID() (int, error) {
+	if s.tmux {
+		return tmuxPanePID(s.dataDir, s.tmuxName)
+	}
+	if s.cmd == nil || s.cmd.Process == nil {
+		return 0, fmt.Errorf("session %s: no live process", s.ID)
+	}
+	return s.cmd.Process.Pid, nil
 }
 
 // Detach releases this process's hold on the session without terminating the
