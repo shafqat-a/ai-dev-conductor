@@ -120,6 +120,8 @@ func main() {
 			r.Post("/api/sessions/{id}/share", api.HandleMintShare(sessionMgr, cfg.PublicURL, cfg.ShareTTL))
 			r.Get("/api/sessions/{id}/shares", api.HandleListShares(sessionMgr))
 			r.Delete("/api/shares/{id}", api.HandleRevokeShare(sessionMgr))
+			r.Post("/api/sessions/{id}/upload", api.HandleUpload(sessionMgr, cfg.MaxUploadBytes))
+			r.Get("/api/sessions/{id}/download", api.HandleDownload(sessionMgr))
 			r.Get("/ws/{id}", ws.HandleWebSocket(sessionMgr))
 		})
 	}

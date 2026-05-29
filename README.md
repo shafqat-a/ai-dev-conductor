@@ -16,6 +16,7 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Auto-reconnect** — Exponential backoff reconnection on connection loss
 - **Authentication** — Bcrypt password hashing with session tokens (cookie + header)
 - **Read-only share links** — Mint a time-boxed public link (`/s/{token}`) that lets anyone watch a session live without controlling it; read-only is enforced server-side, and links can be revoked
+- **File upload / download** — Drag a file onto the terminal to upload it into the session's working directory, or download a file from it via the command palette (path-confined server-side; Linux)
 - **Production-ready** — Systemd service, health checks, graceful shutdown, dead session cleanup
 
 ## Quick Start
@@ -62,6 +63,7 @@ All settings via environment variables:
 | `AI_CONDUCTOR_LOGIN_LOCKOUT` | `1m` | Base lockout, doubling per repeat offence (capped at 16×) |
 | `AI_CONDUCTOR_IDLE_TIMEOUT` | *(off)* | Reap sessions with no clients for this long (e.g. `2h`); `0` disables |
 | `AI_CONDUCTOR_MAX_SESSIONS` | *(unlimited)* | Cap on concurrent live sessions; `0` is unlimited |
+| `AI_CONDUCTOR_MAX_UPLOAD_BYTES` | `104857600` (100 MiB) | Max size of a single file uploaded to a session's working directory |
 | `AI_CONDUCTOR_PUBLIC_URL` | *(request origin)* | External base URL (e.g. `https://host`) used to build absolute share-link URLs |
 | `AI_CONDUCTOR_SHARE_TTL` | `24h` | Default lifetime of a minted share link (capped at 30 days) |
 | `AI_CONDUCTOR_BASE_PATH` | *(none — host root)* | URL path prefix to serve under when behind a reverse-proxy subpath (e.g. `/terminaltest`). All routes, assets, cookies and WebSockets are scoped to it |
@@ -105,6 +107,7 @@ location /terminaltest {
     proxy_set_header Connection $connection_upgrade;
     proxy_read_timeout 86400s;
     proxy_buffering    off;
+    client_max_body_size 100m;               # match AI_CONDUCTOR_MAX_UPLOAD_BYTES
 }
 ```
 
@@ -126,6 +129,21 @@ session; a graceful shutdown only detaches.
 Under **systemd**, set `KillMode=process` (already in the shipped unit) so a
 `systemctl restart` signals only the conductor and leaves the tmux server alive
 for reattach — the default `control-group` kill would otherwise tear it down.
+
+### File upload / download
+
+Files transfer to and from a session's **current working directory** (resolved
+via `/proc/<pid>/cwd`, so it tracks `cd` — **Linux only**):
+
+- **Upload:** drag a file onto the terminal, or run *Upload file to session…*
+  from the command palette (`Ctrl/Cmd+K`). The uploaded filename is reduced to
+  its base name, so a malicious `../` filename cannot escape the directory.
+- **Download:** run *Download file from session…* and enter a path relative to
+  the working directory. The path is confined server-side — `../` traversal and
+  absolute paths outside the CWD are rejected with `403`.
+
+Cap upload size with `AI_CONDUCTOR_MAX_UPLOAD_BYTES`; when behind a proxy, raise
+nginx `client_max_body_size` to match (see the proxy block above).
 
 ## Architecture
 
@@ -164,6 +182,8 @@ main.go                    Entry point, HTTP server, routing (chi)
 | `POST` | `/api/sessions/{id}/share` | Yes | Mint a read-only share link (raw token returned once); optional body `{"ttlSeconds": N}` |
 | `GET` | `/api/sessions/{id}/shares` | Yes | List a session's share links (metadata only) |
 | `DELETE` | `/api/shares/{id}` | Yes | Revoke a share link by its public id |
+| `POST` | `/api/sessions/{id}/upload` | Yes | Upload a file (multipart `file` field) into the session's working directory |
+| `GET` | `/api/sessions/{id}/download?path=…` | Yes | Download a file from within the session's working directory (path-confined) |
 | `GET` | `/ws/{id}` | Yes | WebSocket terminal connection |
 | `GET` | `/s/{token}` | No | Public read-only viewer page for a share link |
 | `GET` | `/ws/share/{token}` | No | Public read-only WebSocket attach (input dropped server-side) |

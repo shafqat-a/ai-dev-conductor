@@ -102,6 +102,21 @@ class TerminalManager {
         // attaching per-connect would stack duplicate handlers.
         this.containerEl.addEventListener('paste', (e) => this.handlePaste(e), true);
 
+        // Drag-and-drop a file onto the terminal to upload it into the session's CWD.
+        this.containerEl.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            this.containerEl.classList.add('drag-over');
+        });
+        this.containerEl.addEventListener('dragleave', (e) => {
+            if (e.target === this.containerEl) this.containerEl.classList.remove('drag-over');
+        });
+        this.containerEl.addEventListener('drop', (e) => {
+            e.preventDefault();
+            this.containerEl.classList.remove('drag-over');
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files) for (const f of files) this.uploadFile(f);
+        });
+
         this.applyThemeToPage();
         this.loadAllSessions();
         // Poll so activity dots / status reflect background sessions.
@@ -710,6 +725,17 @@ class TerminalManager {
         const server = this.getServerById(serverId);
         if (!server) return;
 
+        // Tear down any existing socket first. A reconnect race could otherwise
+        // leave the previous socket open with its onmessage closure still live;
+        // both sockets then write to the same terminal, doubling every byte of
+        // output (e.g. a pasted image path appears twice).
+        if (this.ws) {
+            const stale = this.ws;
+            stale.onopen = stale.onmessage = stale.onclose = stale.onerror = null;
+            try { stale.close(); } catch (_) { /* already closing */ }
+            this.ws = null;
+        }
+
         // A reconnect makes the server re-seed the full scrollback snapshot. Clear
         // the stale buffer once the new socket opens so that snapshot replaces the
         // existing content instead of stacking a duplicate copy on top of it.
@@ -725,9 +751,11 @@ class TerminalManager {
             wsUrl = protocol + '//' + url.host + '/ws/' + sessionId + '?token=' + encodeURIComponent(server.token || '');
         }
 
-        this.ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl);
+        this.ws = ws;
 
-        this.ws.onopen = () => {
+        ws.onopen = () => {
+            if (this.ws !== ws) return; // superseded by a newer socket
             // Reset only on a successful reconnect (the initial connect already has
             // a fresh terminal). Done here, not in attemptReconnect, so the
             // "[Reconnecting…]" notices stay visible until the attach actually lands.
@@ -738,7 +766,8 @@ class TerminalManager {
             this.sendResize();
         };
 
-        this.ws.onmessage = (event) => {
+        ws.onmessage = (event) => {
+            if (this.ws !== ws) return; // ignore output from a stale socket
             try {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'output') {
@@ -749,14 +778,15 @@ class TerminalManager {
             }
         };
 
-        this.ws.onclose = () => {
+        ws.onclose = () => {
+            if (this.ws !== ws) return; // a newer socket already owns the session
             if (this.manualDisconnect || this.currentSessionId !== sessionId || this.currentServerId !== serverId) {
                 return;
             }
             this.attemptReconnect(serverId, sessionId);
         };
 
-        this.ws.onerror = () => {
+        ws.onerror = () => {
             // onclose will fire after this, reconnect handled there
         };
     }
@@ -870,6 +900,94 @@ class TerminalManager {
             }
         }
         // No image present: let the event continue to xterm's text paste.
+    }
+
+    // --- File transfer ---
+
+    // pickAndUpload opens a native file picker and uploads the chosen file(s).
+    pickAndUpload() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.multiple = true;
+        input.addEventListener('change', () => {
+            for (const f of input.files) this.uploadFile(f);
+        });
+        input.click();
+    }
+
+    // uploadFile POSTs a File to the current session's working directory.
+    async uploadFile(file) {
+        if (!this.currentSessionId) {
+            this.toast('No active session', 'error');
+            return;
+        }
+        const server = this.getServerById(this.currentServerId);
+        const form = new FormData();
+        form.append('file', file);
+        this.toast('Uploading ' + file.name + '…');
+        try {
+            const res = await this.fetchFromServer(
+                server, '/api/sessions/' + this.currentSessionId + '/upload',
+                { method: 'POST', body: form });
+            if (res.ok) {
+                this.toast('Uploaded ' + file.name, 'success');
+            } else {
+                const body = await res.json().catch(() => ({}));
+                this.toast('Upload failed: ' + (body.error || res.status), 'error');
+            }
+        } catch (err) {
+            this.toast('Upload failed: ' + err.message, 'error');
+        }
+    }
+
+    // promptAndDownload asks for a path (relative to the session CWD) and downloads it.
+    promptAndDownload() {
+        if (!this.currentSessionId) return;
+        const path = prompt('File to download (relative to the session directory):');
+        if (!path) return;
+        this.downloadFile(path);
+    }
+
+    // downloadFile navigates to the download endpoint, triggering a browser download.
+    // Confinement to the session CWD is enforced server-side.
+    downloadFile(path) {
+        const server = this.getServerById(this.currentServerId);
+        const base = this.getServerBaseUrl(server);
+        const url = base + '/api/sessions/' + this.currentSessionId +
+            '/download?path=' + encodeURIComponent(path);
+        // For local (cookie-auth) servers a plain navigation carries credentials and
+        // lets the browser handle the Content-Disposition download natively.
+        if (server.isLocal || !server.url) {
+            window.open(url, '_blank');
+            return;
+        }
+        // Remote servers authenticate via header, so fetch + object URL instead.
+        this.fetchFromServer(server, '/api/sessions/' + this.currentSessionId +
+            '/download?path=' + encodeURIComponent(path))
+            .then(res => res.ok ? res.blob() : Promise.reject(new Error('HTTP ' + res.status)))
+            .then(blob => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = path.split('/').pop();
+                a.click();
+                URL.revokeObjectURL(a.href);
+            })
+            .catch(err => this.toast('Download failed: ' + err.message, 'error'));
+    }
+
+    // toast shows a transient status message in the corner.
+    toast(message, kind = 'info') {
+        let host = document.getElementById('toast-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'toast-host';
+            document.body.appendChild(host);
+        }
+        const el = document.createElement('div');
+        el.className = 'toast toast-' + kind;
+        el.textContent = message;
+        host.appendChild(el);
+        setTimeout(() => el.remove(), 4000);
     }
 
     // --- Input (with mobile Ctrl modifier) ---
@@ -1047,6 +1165,10 @@ class TerminalManager {
             { label: 'Next session', run: () => this.cycleSession(1) },
             { label: 'Previous session', run: () => this.cycleSession(-1) },
         ];
+        if (this.currentSessionId) {
+            cmds.push({ label: 'Upload file to session…', run: () => this.pickAndUpload() });
+            cmds.push({ label: 'Download file from session…', run: () => this.promptAndDownload() });
+        }
         Object.keys(THEMES).forEach(k => cmds.push({
             label: 'Theme: ' + THEMES[k].label,
             run: () => { this.prefs.theme = k; this.savePrefs(); this.applyPrefs(); },
