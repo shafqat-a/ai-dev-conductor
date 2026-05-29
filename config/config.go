@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -14,16 +15,24 @@ type Config struct {
 	Shell          string
 	SessionTimeout time.Duration
 	PIDFile        string
+
+	// Login brute-force protection. LoginMaxAttempts <= 0 disables it.
+	LoginMaxAttempts int
+	LoginWindow      time.Duration
+	LoginLockout     time.Duration
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		Password:       envOrDefault("AI_CONDUCTOR_PASSWORD", "admin"),
-		ListenAddr:     envOrDefault("AI_CONDUCTOR_ADDR", "0.0.0.0:8080"),
-		DataDir:        envOrDefault("AI_CONDUCTOR_DATA_DIR", "./data/sessions"),
-		Shell:          envOrDefault("AI_CONDUCTOR_SHELL", ""),
-		SessionTimeout: 24 * time.Hour,
-		PIDFile:        os.Getenv("AI_CONDUCTOR_PID_FILE"),
+		Password:         envOrDefault("AI_CONDUCTOR_PASSWORD", "admin"),
+		ListenAddr:       envOrDefault("AI_CONDUCTOR_ADDR", "0.0.0.0:8080"),
+		DataDir:          envOrDefault("AI_CONDUCTOR_DATA_DIR", "./data/sessions"),
+		Shell:            envOrDefault("AI_CONDUCTOR_SHELL", ""),
+		SessionTimeout:   24 * time.Hour,
+		PIDFile:          os.Getenv("AI_CONDUCTOR_PID_FILE"),
+		LoginMaxAttempts: envInt("AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS", 5),
+		LoginWindow:      envDuration("AI_CONDUCTOR_LOGIN_WINDOW", time.Minute),
+		LoginLockout:     envDuration("AI_CONDUCTOR_LOGIN_LOCKOUT", time.Minute),
 	}
 
 	if cfg.Shell == "" {
@@ -68,6 +77,24 @@ func detectShell() string {
 func envOrDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }
