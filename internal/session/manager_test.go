@@ -23,7 +23,7 @@ func testShell(t *testing.T) string {
 // newTestManager returns a Manager backed by a temp store, cleaned up on exit.
 func newTestManager(t *testing.T, st *store.Store) *Manager {
 	t.Helper()
-	m := NewManager(testShell(t), t.TempDir(), st, 0, 0)
+	m := NewManager(testShell(t), t.TempDir(), st, 0, 0, false)
 	t.Cleanup(m.CloseAll)
 	return m
 }
@@ -100,13 +100,13 @@ func TestManagerReconcileOnRestart(t *testing.T) {
 	st := newTestStore(t)
 	dir := t.TempDir()
 
-	m1 := NewManager(testShell(t), dir, st, 0, 0)
+	m1 := NewManager(testShell(t), dir, st, 0, 0, false)
 	m1.Create("a")
 	m1.Create("b")
 	m1.CloseAll() // simulates the process going away
 
 	// A fresh Manager on the same store: no live PTYs, rows shown detached.
-	m2 := NewManager(testShell(t), dir, st, 0, 0)
+	m2 := NewManager(testShell(t), dir, st, 0, 0, false)
 	t.Cleanup(m2.CloseAll)
 
 	list := m2.List()

@@ -42,10 +42,9 @@ func HandleWebSocket(mgr *session.Manager) http.HandlerFunc {
 		client := sess.AddClient()
 		log.Printf("client connected to session %s", id)
 
-		// Send history on connect
-		history, err := session.ReadHistory(mgr.DataDir(), id)
-		if err == nil && len(history) > 0 {
-			msg := Message{Type: MessageTypeOutput, Data: string(history)}
+		// Seed the viewer with prior output (tmux scrollback or history file).
+		if snapshot := sess.Snapshot(); len(snapshot) > 0 {
+			msg := Message{Type: MessageTypeOutput, Data: string(snapshot)}
 			if payload, err := json.Marshal(msg); err == nil {
 				conn.WriteMessage(websocket.TextMessage, payload)
 			}
@@ -95,9 +94,8 @@ func HandleShareWebSocket(mgr *session.Manager) http.HandlerFunc {
 		client := sess.AddClient()
 		log.Printf("read-only viewer connected to session %s", sessionID)
 
-		history, err := session.ReadHistory(mgr.DataDir(), sessionID)
-		if err == nil && len(history) > 0 {
-			msg := Message{Type: MessageTypeOutput, Data: string(history)}
+		if snapshot := sess.Snapshot(); len(snapshot) > 0 {
+			msg := Message{Type: MessageTypeOutput, Data: string(snapshot)}
 			if payload, err := json.Marshal(msg); err == nil {
 				conn.WriteMessage(websocket.TextMessage, payload)
 			}

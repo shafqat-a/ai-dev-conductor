@@ -27,17 +27,19 @@ type Manager struct {
 	store       *store.Store
 	idleTimeout time.Duration // 0 = never reap
 	maxSessions int           // 0 = unlimited
+	useTmux     bool          // back sessions with tmux so they survive a restart
 
 	stop chan struct{}
 }
 
-// NewManager wires the live-session map to the persistent metadata store. Any
-// row left as "running" by a previous process is reconciled to "detached",
-// since a fresh process owns no live PTYs (until session-survival lands).
+// NewManager wires the live-session map to the persistent metadata store. On
+// startup every persisted row is first reconciled to "detached"; then, when
+// useTmux is set, any surviving tmux session is reattached and flipped back to
+// "running". Rows with no surviving tmux session stay "detached".
 //
 // idleTimeout > 0 enables reaping of sessions left with no clients for longer
 // than the timeout. maxSessions > 0 caps the number of concurrent live sessions.
-func NewManager(shell, dataDir string, st *store.Store, idleTimeout time.Duration, maxSessions int) *Manager {
+func NewManager(shell, dataDir string, st *store.Store, idleTimeout time.Duration, maxSessions int, useTmux bool) *Manager {
 	m := &Manager{
 		sessions:    make(map[string]*Session),
 		shell:       shell,
@@ -45,11 +47,15 @@ func NewManager(shell, dataDir string, st *store.Store, idleTimeout time.Duratio
 		store:       st,
 		idleTimeout: idleTimeout,
 		maxSessions: maxSessions,
+		useTmux:     useTmux,
 		stop:        make(chan struct{}),
 	}
 	if st != nil {
 		if err := st.MarkAllDetached(); err != nil {
 			log.Printf("store: reconcile on startup: %v", err)
+		}
+		if useTmux {
+			m.reattachAll()
 		}
 		go m.flushLoop()
 	}
@@ -59,23 +65,64 @@ func NewManager(shell, dataDir string, st *store.Store, idleTimeout time.Duratio
 	return m
 }
 
-func (m *Manager) Create(name string) (*Session, error) {
-	if m.maxSessions > 0 {
-		m.mu.RLock()
-		n := len(m.sessions)
-		m.mu.RUnlock()
-		if n >= m.maxSessions {
-			return nil, ErrSessionLimit
+// reattachAll re-binds to every surviving tmux session after a restart, restoring
+// it to the live map and marking its row "running". Runs once at startup.
+func (m *Manager) reattachAll() {
+	ids := tmuxListSessions(m.dataDir)
+	if len(ids) == 0 {
+		return
+	}
+
+	names := make(map[string]string)
+	created := make(map[string]int64)
+	if rows, err := m.store.List(); err == nil {
+		for _, r := range rows {
+			names[r.ID] = r.Name
+			created[r.ID] = r.CreatedAt
 		}
 	}
 
-	id := uuid.New().String()[:8]
+	for _, id := range ids {
+		name := names[id]
+		createdAt := time.Now()
+		_, known := created[id]
+		if known {
+			createdAt = time.Unix(created[id], 0)
+		}
 
-	s, err := NewSession(id, name, m.shell, m.dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
+		s, err := ReattachSession(id, name, m.shell, m.dataDir, createdAt)
+		if err != nil {
+			log.Printf("session %s: reattach failed: %v", id, err)
+			continue
+		}
+		m.wireHandlers(s)
+
+		m.mu.Lock()
+		m.sessions[id] = s
+		m.mu.Unlock()
+
+		if known {
+			m.setStatus(id, store.StatusRunning)
+		} else {
+			// A tmux session with no store row (e.g. minted before persistence)
+			// — adopt it so it shows up in the UI.
+			if err := m.store.Upsert(store.SessionMeta{
+				ID:             id,
+				Name:           s.GetName(),
+				CreatedAt:      createdAt.Unix(),
+				LastActivityAt: s.LastActivity(),
+				Status:         store.StatusRunning,
+			}); err != nil {
+				log.Printf("store: adopt reattached %s: %v", id, err)
+			}
+		}
+		log.Printf("session %s: reattached to surviving tmux session", id)
 	}
+}
 
+// wireHandlers installs the manager-side callbacks that keep the store in sync
+// with a session's process- and client-lifecycle. Shared by Create and reattach.
+func (m *Manager) wireHandlers(s *Session) {
 	s.OnProcessExit = func(sessionID string) {
 		m.mu.Lock()
 		_, exists := m.sessions[sessionID]
@@ -103,6 +150,26 @@ func (m *Manager) Create(name string) (*Session, error) {
 			}
 		}
 	}
+}
+
+func (m *Manager) Create(name string) (*Session, error) {
+	if m.maxSessions > 0 {
+		m.mu.RLock()
+		n := len(m.sessions)
+		m.mu.RUnlock()
+		if n >= m.maxSessions {
+			return nil, ErrSessionLimit
+		}
+	}
+
+	id := uuid.New().String()[:8]
+
+	s, err := NewSession(id, name, m.shell, m.dataDir, m.useTmux)
+	if err != nil {
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+
+	m.wireHandlers(s)
 
 	m.mu.Lock()
 	m.sessions[id] = s
@@ -300,7 +367,10 @@ func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, s := range m.sessions {
-		s.Close()
+		// Detach (not Close) so tmux-backed shells survive this shutdown and can
+		// be reattached on the next start. Raw-PTY sessions are killed (Detach
+		// falls back to Close), since they cannot outlive the process anyway.
+		s.Detach()
 		m.setStatus(id, store.StatusDetached)
 		delete(m.sessions, id)
 	}

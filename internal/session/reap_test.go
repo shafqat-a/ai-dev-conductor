@@ -7,7 +7,7 @@ import (
 
 func TestReapsIdleUnattachedSession(t *testing.T) {
 	st := newTestStore(t)
-	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0)
+	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0, false)
 	t.Cleanup(m.CloseAll)
 
 	s, err := m.Create("idle")
@@ -28,7 +28,7 @@ func TestReapsIdleUnattachedSession(t *testing.T) {
 
 func TestDoesNotReapAttachedSession(t *testing.T) {
 	st := newTestStore(t)
-	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0)
+	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0, false)
 	t.Cleanup(m.CloseAll)
 
 	s, _ := m.Create("active")
@@ -43,7 +43,7 @@ func TestDoesNotReapAttachedSession(t *testing.T) {
 
 func TestReapsAfterClientLeaves(t *testing.T) {
 	st := newTestStore(t)
-	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0)
+	m := NewManager(testShell(t), t.TempDir(), st, 50*time.Millisecond, 0, false)
 	t.Cleanup(m.CloseAll)
 
 	s, _ := m.Create("x")
@@ -63,7 +63,7 @@ func TestReapsAfterClientLeaves(t *testing.T) {
 
 func TestMaxSessionsLimit(t *testing.T) {
 	st := newTestStore(t)
-	m := NewManager(testShell(t), t.TempDir(), st, 0, 2)
+	m := NewManager(testShell(t), t.TempDir(), st, 0, 2, false)
 	t.Cleanup(m.CloseAll)
 
 	if _, err := m.Create("a"); err != nil {

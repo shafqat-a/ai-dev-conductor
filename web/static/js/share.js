@@ -27,7 +27,7 @@
 
     function connect() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(protocol + '//' + window.location.host + '/ws/share/' + token);
+        ws = new WebSocket(protocol + '//' + window.location.host + (window.BASE_PATH || '') + '/ws/share/' + token);
 
         ws.onopen = () => { reconnectAttempts = 0; setStatus('live'); };
 

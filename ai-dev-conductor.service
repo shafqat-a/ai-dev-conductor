@@ -14,6 +14,13 @@ Restart=on-failure
 RestartSec=3s
 WatchdogSec=30s
 
+# Session survival: when AI_CONDUCTOR_TMUX is enabled (default when tmux is
+# installed), shells run in a detached tmux server that must outlive a restart.
+# KillMode=process signals only the conductor on stop/restart, leaving the tmux
+# server (and its shells) running for reattach. Without this, the default
+# control-group kill would tear down the tmux server too.
+KillMode=process
+
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict

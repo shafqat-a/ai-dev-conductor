@@ -22,7 +22,8 @@ func HandleHealthCheck() http.HandlerFunc {
 	}
 }
 
-func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, limiter *auth.RateLimiter, sessionTimeout time.Duration) http.HandlerFunc {
+func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, limiter *auth.RateLimiter, sessionTimeout time.Duration, basePath string) http.HandlerFunc {
+	cookiePath := basePath + "/"
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 
@@ -65,7 +66,7 @@ func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, limiter *a
 		http.SetCookie(w, &http.Cookie{
 			Name:     auth.CookieName,
 			Value:    token,
-			Path:     "/",
+			Path:     cookiePath,
 			HttpOnly: true,
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   int(sessionTimeout.Seconds()),

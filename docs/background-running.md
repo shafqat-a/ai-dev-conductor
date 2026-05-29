@@ -102,6 +102,10 @@ On SIGINT or SIGTERM:
 
 ### Installation
 
+> **Prerequisite:** install `tmux` (`sudo apt install tmux`). It is a hard
+> dependency — sessions run inside tmux to survive restarts, and the service
+> exits on startup if tmux is missing.
+
 1. Build and install the binary:
 
 ```bash
@@ -148,6 +152,7 @@ The service file (`ai-dev-conductor.service`) includes:
 | `Restart` | `on-failure` | Auto-restart on crash (not on clean exit) |
 | `RestartSec` | `3s` | Wait 3 seconds between restart attempts |
 | `WatchdogSec` | `30s` | Systemd kills the process if no watchdog ping in 30s |
+| `KillMode` | `process` | Signal only the conductor on stop, so the detached tmux server (session survival) keeps running for reattach |
 | `NoNewPrivileges` | `true` | Process cannot gain new privileges |
 | `ProtectSystem` | `strict` | Filesystem is read-only except allowed paths |
 | `ProtectHome` | `true` | No access to /home |

@@ -44,7 +44,7 @@ func TestShareWebSocketIsReadOnly(t *testing.T) {
 	}
 	defer st.Close()
 
-	mgr := session.NewManager("/bin/sh", dir, st, 0, 0)
+	mgr := session.NewManager("/bin/sh", dir, st, 0, 0, false)
 	defer mgr.CloseAll() // stop session goroutines before the store closes
 	sess, err := mgr.Create("")
 	if err != nil {
@@ -113,7 +113,7 @@ func TestShareWebSocketRejectsBadToken(t *testing.T) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer st.Close()
-	mgr := session.NewManager("/bin/sh", dir, st, 0, 0)
+	mgr := session.NewManager("/bin/sh", dir, st, 0, 0, false)
 
 	r := chi.NewRouter()
 	r.Get("/ws/share/{token}", HandleShareWebSocket(mgr))

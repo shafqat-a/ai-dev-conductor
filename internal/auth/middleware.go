@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,7 +56,12 @@ func (s *SessionStore) cleanup() {
 	}
 }
 
-func RequireAuth(store *SessionStore) func(http.Handler) http.Handler {
+// RequireAuth gates routes behind a valid session. basePath is the URL prefix the
+// app is mounted under (e.g. "/terminaltest", or "" for root); it's needed so the
+// unauthenticated redirect lands on the login page and so API/WS paths are detected
+// correctly when the prefix is present.
+func RequireAuth(store *SessionStore, basePath string) func(http.Handler) http.Handler {
+	loginURL := basePath + "/"
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var token string
@@ -72,10 +78,10 @@ func RequireAuth(store *SessionStore) func(http.Handler) http.Handler {
 			}
 
 			if token == "" || !store.Validate(token) {
-				if isAPIRequest(r) {
+				if isAPIRequest(r, basePath) {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				} else {
-					http.Redirect(w, r, "/", http.StatusSeeOther)
+					http.Redirect(w, r, loginURL, http.StatusSeeOther)
 				}
 				return
 			}
@@ -84,7 +90,7 @@ func RequireAuth(store *SessionStore) func(http.Handler) http.Handler {
 	}
 }
 
-func isAPIRequest(r *http.Request) bool {
-	return len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" ||
-		len(r.URL.Path) >= 3 && r.URL.Path[:3] == "/ws"
+func isAPIRequest(r *http.Request, basePath string) bool {
+	path := strings.TrimPrefix(r.URL.Path, basePath)
+	return strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/ws")
 }
