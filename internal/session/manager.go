@@ -15,26 +15,37 @@ import (
 // flushInterval is how often live-session activity/size is persisted.
 const flushInterval = 15 * time.Second
 
+// ErrSessionLimit is returned by Create when MaxSessions is reached.
+var ErrSessionLimit = fmt.Errorf("session limit reached")
+
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	shell    string
 	dataDir  string
 
-	store     *store.Store
-	stopFlush chan struct{}
+	store       *store.Store
+	idleTimeout time.Duration // 0 = never reap
+	maxSessions int           // 0 = unlimited
+
+	stop chan struct{}
 }
 
 // NewManager wires the live-session map to the persistent metadata store. Any
 // row left as "running" by a previous process is reconciled to "detached",
 // since a fresh process owns no live PTYs (until session-survival lands).
-func NewManager(shell, dataDir string, st *store.Store) *Manager {
+//
+// idleTimeout > 0 enables reaping of sessions left with no clients for longer
+// than the timeout. maxSessions > 0 caps the number of concurrent live sessions.
+func NewManager(shell, dataDir string, st *store.Store, idleTimeout time.Duration, maxSessions int) *Manager {
 	m := &Manager{
-		sessions:  make(map[string]*Session),
-		shell:     shell,
-		dataDir:   dataDir,
-		store:     st,
-		stopFlush: make(chan struct{}),
+		sessions:    make(map[string]*Session),
+		shell:       shell,
+		dataDir:     dataDir,
+		store:       st,
+		idleTimeout: idleTimeout,
+		maxSessions: maxSessions,
+		stop:        make(chan struct{}),
 	}
 	if st != nil {
 		if err := st.MarkAllDetached(); err != nil {
@@ -42,10 +53,22 @@ func NewManager(shell, dataDir string, st *store.Store) *Manager {
 		}
 		go m.flushLoop()
 	}
+	if idleTimeout > 0 {
+		go m.reapLoop()
+	}
 	return m
 }
 
 func (m *Manager) Create(name string) (*Session, error) {
+	if m.maxSessions > 0 {
+		m.mu.RLock()
+		n := len(m.sessions)
+		m.mu.RUnlock()
+		if n >= m.maxSessions {
+			return nil, ErrSessionLimit
+		}
+	}
+
 	id := uuid.New().String()[:8]
 
 	s, err := NewSession(id, name, m.shell, m.dataDir)
@@ -87,11 +110,12 @@ func (m *Manager) Create(name string) (*Session, error) {
 
 	if m.store != nil {
 		if err := m.store.Upsert(store.SessionMeta{
-			ID:             s.ID,
-			Name:           s.GetName(),
-			CreatedAt:      s.CreatedAt.Unix(),
-			LastActivityAt: s.LastActivity(),
-			Status:         store.StatusRunning,
+			ID:                     s.ID,
+			Name:                   s.GetName(),
+			CreatedAt:              s.CreatedAt.Unix(),
+			LastActivityAt:         s.LastActivity(),
+			LastClientDisconnectAt: s.CreatedAt.Unix(), // idle from birth until first attach
+			Status:                 store.StatusRunning,
 		}); err != nil {
 			log.Printf("store: upsert new session %s: %v", id, err)
 		}
@@ -258,11 +282,11 @@ func (m *Manager) Delete(id string) error {
 }
 
 func (m *Manager) CloseAll() {
-	if m.stopFlush != nil {
+	if m.stop != nil {
 		select {
-		case <-m.stopFlush: // already closed
+		case <-m.stop: // already closed
 		default:
-			close(m.stopFlush)
+			close(m.stop)
 		}
 	}
 	m.flush() // persist final activity before tearing down
@@ -295,10 +319,56 @@ func (m *Manager) flushLoop() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-m.stopFlush:
+		case <-m.stop:
 			return
 		case <-ticker.C:
 			m.flush()
+		}
+	}
+}
+
+// reapInterval derives a sensible check cadence from the idle timeout.
+func (m *Manager) reapInterval() time.Duration {
+	d := m.idleTimeout / 2
+	if d < time.Second {
+		d = time.Second
+	}
+	if d > time.Minute {
+		d = time.Minute
+	}
+	return d
+}
+
+// reapLoop periodically closes sessions left idle (no clients) past idleTimeout.
+func (m *Manager) reapLoop() {
+	ticker := time.NewTicker(m.reapInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+			m.reapOnce()
+		}
+	}
+}
+
+// reapOnce closes and removes every live session that has had no clients for
+// longer than idleTimeout.
+func (m *Manager) reapOnce() {
+	m.mu.RLock()
+	var victims []string
+	for id, s := range m.sessions {
+		if d := s.IdleDuration(); d >= 0 && d > m.idleTimeout {
+			victims = append(victims, id)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, id := range victims {
+		log.Printf("session %s: reaped (idle > %s)", id, m.idleTimeout)
+		if err := m.Delete(id); err != nil {
+			log.Printf("reap %s: %v", id, err)
 		}
 	}
 }

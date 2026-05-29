@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -89,6 +90,10 @@ func HandleCreateSession(mgr *session.Manager) http.HandlerFunc {
 		json.NewDecoder(r.Body).Decode(&req)
 
 		s, err := mgr.Create(req.Name)
+		if errors.Is(err, session.ErrSessionLimit) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return

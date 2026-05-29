@@ -56,7 +56,7 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 
-	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir, metaStore)
+	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir, metaStore, cfg.IdleTimeout, cfg.MaxSessions)
 
 	// Parse templates — use fs.Sub to strip prefix so template names are just "login.html" etc.
 	templateSub, _ := fs.Sub(templateFS, "web/templates")
