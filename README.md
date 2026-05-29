@@ -9,6 +9,10 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Real-time streaming** — WebSocket-based terminal I/O with xterm.js
 - **Session persistence** — Output history saved to disk and replayed on reconnect
 - **Image paste** — Ctrl+V of a clipboard image is delivered to the server's clipboard (or a file) so terminal programs like Claude Code can read it
+- **Command palette & shortcuts** — `Ctrl/Cmd+K` palette; `Ctrl+Shift+]`/`[` cycle sessions; `Ctrl+Shift+N` new session
+- **Themes & fonts** — Switchable terminal themes (Tokyo Night, Dracula, Solarized, Light) and font size, saved per browser
+- **Activity indicators** — Unread-output dots in the sidebar + terminal-bell desktop notifications
+- **Mobile-friendly** — On-screen Esc/Tab/Ctrl/arrow keys and a slide-in sidebar on small screens
 - **Auto-reconnect** — Exponential backoff reconnection on connection loss
 - **Authentication** — Bcrypt password hashing with session tokens (cookie + header)
 - **Production-ready** — Systemd service, health checks, graceful shutdown, dead session cleanup

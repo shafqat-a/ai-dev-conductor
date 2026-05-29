@@ -1,3 +1,53 @@
+// Terminal color themes. The xterm block is passed straight to Terminal.options.theme.
+const THEMES = {
+    tokyonight: {
+        label: 'Tokyo Night',
+        bg: '#1a1b26', panel: '#24283b', border: '#414868', accent: '#7aa2f7', text: '#c0caf5',
+        xterm: {
+            background: '#1a1b26', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#33467c',
+            black: '#15161e', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68', blue: '#7aa2f7',
+            magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6', brightBlack: '#414868', brightRed: '#f7768e',
+            brightGreen: '#9ece6a', brightYellow: '#e0af68', brightBlue: '#7aa2f7', brightMagenta: '#bb9af7',
+            brightCyan: '#7dcfff', brightWhite: '#c0caf5',
+        },
+    },
+    dracula: {
+        label: 'Dracula',
+        bg: '#282a36', panel: '#21222c', border: '#44475a', accent: '#bd93f9', text: '#f8f8f2',
+        xterm: {
+            background: '#282a36', foreground: '#f8f8f2', cursor: '#f8f8f2', selectionBackground: '#44475a',
+            black: '#21222c', red: '#ff5555', green: '#50fa7b', yellow: '#f1fa8c', blue: '#bd93f9',
+            magenta: '#ff79c6', cyan: '#8be9fd', white: '#f8f8f2', brightBlack: '#6272a4', brightRed: '#ff6e6e',
+            brightGreen: '#69ff94', brightYellow: '#ffffa5', brightBlue: '#d6acff', brightMagenta: '#ff92df',
+            brightCyan: '#a4ffff', brightWhite: '#ffffff',
+        },
+    },
+    solarizedDark: {
+        label: 'Solarized Dark',
+        bg: '#002b36', panel: '#073642', border: '#0a4b5a', accent: '#268bd2', text: '#93a1a1',
+        xterm: {
+            background: '#002b36', foreground: '#93a1a1', cursor: '#93a1a1', selectionBackground: '#073642',
+            black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900', blue: '#268bd2',
+            magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5', brightBlack: '#586e75', brightRed: '#cb4b16',
+            brightGreen: '#586e75', brightYellow: '#657b83', brightBlue: '#839496', brightMagenta: '#6c71c4',
+            brightCyan: '#93a1a1', brightWhite: '#fdf6e3',
+        },
+    },
+    light: {
+        label: 'Light',
+        bg: '#fafafa', panel: '#eceff4', border: '#d8dee9', accent: '#2563eb', text: '#2e3440',
+        xterm: {
+            background: '#fafafa', foreground: '#2e3440', cursor: '#2e3440', selectionBackground: '#d8dee9',
+            black: '#2e3440', red: '#bf616a', green: '#a3be8c', yellow: '#d08770', blue: '#5e81ac',
+            magenta: '#b48ead', cyan: '#88c0d0', white: '#e5e9f0', brightBlack: '#4c566a', brightRed: '#bf616a',
+            brightGreen: '#a3be8c', brightYellow: '#ebcb8b', brightBlue: '#81a1c1', brightMagenta: '#b48ead',
+            brightCyan: '#8fbcbb', brightWhite: '#eceff4',
+        },
+    },
+};
+
+const FONT_FAMILY = "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace";
+
 class TerminalManager {
     constructor() {
         // Current connection state
@@ -14,20 +64,87 @@ class TerminalManager {
         // Server management
         this.servers = this.loadServers();
 
+        // Preferences (theme + font size) and per-session activity bookkeeping.
+        this.prefs = this.loadPrefs();
+        this.activitySeen = {};          // "serverId:sessionId" -> last activity ts acknowledged
+        this.ctrlArmed = false;          // mobile Ctrl key one-shot modifier
+
         // DOM elements
         this.sessionListEl = document.getElementById('session-list');
         this.placeholderEl = document.getElementById('placeholder');
         this.containerEl = document.getElementById('terminal-container');
+        this.appEl = document.getElementById('app');
 
         document.getElementById('btn-new-session').addEventListener('click', () => this.createSession());
         document.getElementById('btn-add-server').addEventListener('click', () => this.addServer());
+        document.getElementById('btn-settings').addEventListener('click', () => this.openSettings());
+        document.getElementById('btn-palette').addEventListener('click', () => this.openPalette());
+        document.getElementById('btn-sidebar-toggle').addEventListener('click', () => this.toggleSidebar());
+        document.getElementById('sidebar-scrim').addEventListener('click', () => this.toggleSidebar(false));
         window.addEventListener('resize', () => this.handleResize());
+        // Capture phase so our shortcuts win before xterm consumes the key.
+        document.addEventListener('keydown', (e) => this.handleGlobalKeys(e), true);
+
+        // Mobile on-screen modifier / navigation keys.
+        document.getElementById('mobile-keybar').querySelectorAll('button').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                if (btn.dataset.action === 'ctrl') {
+                    this.setCtrlArmed(!this.ctrlArmed);
+                } else if (btn.dataset.seq != null) {
+                    this.sendInput(btn.dataset.seq);
+                    if (this.term) this.term.focus();
+                }
+            });
+        });
 
         // Registered once: the container element is reused across sessions, so
         // attaching per-connect would stack duplicate handlers.
         this.containerEl.addEventListener('paste', (e) => this.handlePaste(e), true);
 
+        this.applyThemeToPage();
         this.loadAllSessions();
+        // Poll so activity dots / status reflect background sessions.
+        this.pollTimer = setInterval(() => this.loadAllSessions(), 5000);
+    }
+
+    // --- Preferences ---
+
+    loadPrefs() {
+        const defaults = { theme: 'tokyonight', fontSize: 14 };
+        try {
+            return { ...defaults, ...JSON.parse(localStorage.getItem('ai_conductor_prefs') || '{}') };
+        } catch {
+            return defaults;
+        }
+    }
+
+    savePrefs() {
+        localStorage.setItem('ai_conductor_prefs', JSON.stringify(this.prefs));
+    }
+
+    theme() {
+        return THEMES[this.prefs.theme] || THEMES.tokyonight;
+    }
+
+    // Push theme colors into CSS custom properties so the chrome matches the terminal.
+    applyThemeToPage() {
+        const t = this.theme();
+        const root = document.documentElement.style;
+        root.setProperty('--bg', t.bg);
+        root.setProperty('--panel', t.panel);
+        root.setProperty('--border', t.border);
+        root.setProperty('--accent', t.accent);
+        root.setProperty('--text', t.text);
+    }
+
+    applyPrefs() {
+        this.applyThemeToPage();
+        if (this.term) {
+            this.term.options.theme = this.theme().xterm;
+            this.term.options.fontSize = this.prefs.fontSize;
+            if (this.fitAddon) this.fitAddon.fit();
+            this.sendResize();
+        }
     }
 
     // --- Server Management ---
@@ -205,14 +322,35 @@ class TerminalManager {
             // Sessions under this server
             group.sessions.forEach(s => {
                 const isActive = this.currentServerId === serverId && this.currentSessionId === s.id;
+                const key = serverId + ':' + s.id;
+                const activity = s.lastActivityAt || 0;
+
+                // Establish a baseline the first time we see a session, and keep the
+                // focused session marked as read. Otherwise flag fresh output.
+                if (isActive) {
+                    this.activitySeen[key] = activity;
+                } else if (this.activitySeen[key] === undefined) {
+                    this.activitySeen[key] = activity;
+                }
+                const unread = !isActive && activity > (this.activitySeen[key] || 0);
+                const detached = s.status === 'detached' || s.status === 'dead';
+
+                if (isActive) {
+                    document.getElementById('topbar-title').textContent = s.name || s.id;
+                }
+
                 const item = document.createElement('div');
-                item.className = 'session-item' + (isActive ? ' active' : '');
+                item.className = 'session-item' + (isActive ? ' active' : '') + (detached ? ' detached' : '');
                 item.dataset.serverId = serverId;
                 item.dataset.sessionId = s.id;
 
+                const dot = document.createElement('span');
+                dot.className = 'activity-dot' + (unread ? ' unread' : '');
+                item.appendChild(dot);
+
                 const nameSpan = document.createElement('span');
                 nameSpan.className = 'session-name';
-                nameSpan.title = s.createdAt;
+                nameSpan.title = s.createdAt + (detached ? ' (detached — shell not running)' : '');
                 nameSpan.textContent = s.name || s.id;
                 nameSpan.addEventListener('click', () => this.connectToSession(serverId, s.id));
 
@@ -397,6 +535,8 @@ class TerminalManager {
         this.currentSessionId = sessionId;
         this.manualDisconnect = false;
         this.reconnectAttempts = 0;
+        this.activitySeen[serverId + ':' + sessionId] = Math.floor(Date.now() / 1000);
+        this.toggleSidebar(false); // collapse the overlay sidebar on mobile
 
         // Show terminal container
         this.placeholderEl.style.display = 'none';
@@ -412,30 +552,9 @@ class TerminalManager {
         // Create terminal
         this.term = new Terminal({
             cursorBlink: true,
-            fontSize: 14,
-            fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-            theme: {
-                background: '#1a1b26',
-                foreground: '#c0caf5',
-                cursor: '#c0caf5',
-                selectionBackground: '#33467c',
-                black: '#15161e',
-                red: '#f7768e',
-                green: '#9ece6a',
-                yellow: '#e0af68',
-                blue: '#7aa2f7',
-                magenta: '#bb9af7',
-                cyan: '#7dcfff',
-                white: '#a9b1d6',
-                brightBlack: '#414868',
-                brightRed: '#f7768e',
-                brightGreen: '#9ece6a',
-                brightYellow: '#e0af68',
-                brightBlue: '#7aa2f7',
-                brightMagenta: '#bb9af7',
-                brightCyan: '#7dcfff',
-                brightWhite: '#c0caf5',
-            }
+            fontSize: this.prefs.fontSize,
+            fontFamily: FONT_FAMILY,
+            theme: this.theme().xterm,
         });
 
         this.fitAddon = new FitAddon.FitAddon();
@@ -445,12 +564,11 @@ class TerminalManager {
         this.term.open(this.containerEl);
         this.fitAddon.fit();
 
-        // Send terminal input to server
-        this.term.onData((data) => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ type: 'input', data: data }));
-            }
-        });
+        // Send terminal input to server (via sendInput so the mobile Ctrl modifier applies).
+        this.term.onData((data) => this.sendInput(data));
+
+        // Terminal bell -> notify + mark unread if not focused.
+        this.term.onBell(() => this.handleBell(serverId, sessionId));
 
         // Handle terminal-generated binary reports (DSR, etc.) as raw PTY input.
         this.term.onBinary((data) => {
@@ -571,6 +689,8 @@ class TerminalManager {
         this.placeholderEl.style.display = 'flex';
         this.currentSessionId = null;
         this.currentServerId = null;
+        const title = document.getElementById('topbar-title');
+        if (title) title.textContent = 'AI Dev Conductor';
     }
 
     handleResize() {
@@ -621,6 +741,217 @@ class TerminalManager {
             }
         }
         // No image present: let the event continue to xterm's text paste.
+    }
+
+    // --- Input (with mobile Ctrl modifier) ---
+
+    sendInput(data) {
+        if (this.ctrlArmed) {
+            data = this.applyCtrl(data);
+            this.setCtrlArmed(false);
+        }
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'input', data }));
+        }
+    }
+
+    applyCtrl(data) {
+        if (data.length !== 1) return data;
+        const code = data.toLowerCase().charCodeAt(0);
+        if (code >= 97 && code <= 122) return String.fromCharCode(code - 96); // a..z -> ^A..^Z
+        if (data === ' ') return '\x00';
+        return data;
+    }
+
+    setCtrlArmed(on) {
+        this.ctrlArmed = on;
+        const btn = document.getElementById('key-ctrl');
+        if (btn) btn.classList.toggle('armed', on);
+    }
+
+    // --- Bell / notifications ---
+
+    handleBell(serverId, sessionId) {
+        const focused = this.currentServerId === serverId &&
+            this.currentSessionId === sessionId && !document.hidden;
+        if (!focused) {
+            this.activitySeen[serverId + ':' + sessionId] = 0; // force unread dot
+            this.loadAllSessions();
+            this.notify('Terminal bell', this.sessionLabel(serverId, sessionId));
+        }
+    }
+
+    notify(title, body) {
+        if (!('Notification' in window)) return;
+        if (Notification.permission === 'granted') {
+            new Notification(title, { body });
+        } else if (Notification.permission !== 'denied') {
+            Notification.requestPermission();
+        }
+    }
+
+    sessionLabel(serverId, sessionId) {
+        const el = this.sessionListEl.querySelector(
+            '.session-item[data-server-id="' + serverId + '"][data-session-id="' + sessionId + '"] .session-name');
+        return el ? el.textContent : sessionId;
+    }
+
+    // --- Sidebar (mobile overlay) ---
+
+    toggleSidebar(force) {
+        const open = force === undefined ? !this.appEl.classList.contains('sidebar-open') : force;
+        this.appEl.classList.toggle('sidebar-open', open);
+    }
+
+    // --- Overlays ---
+
+    makeOverlay(cls) {
+        const overlay = document.createElement('div');
+        overlay.className = 'overlay ' + cls;
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) this.closeOverlays(); });
+        document.body.appendChild(overlay);
+        return overlay;
+    }
+
+    closeOverlays() {
+        document.querySelectorAll('.overlay').forEach(el => el.remove());
+    }
+
+    openSettings() {
+        this.closeOverlays();
+        const overlay = this.makeOverlay('settings-overlay');
+        const panel = document.createElement('div');
+        panel.className = 'overlay-panel';
+        panel.innerHTML = '<h2>Settings</h2>';
+
+        const themeRow = document.createElement('div');
+        themeRow.className = 'settings-row';
+        themeRow.innerHTML = '<label>Theme</label>';
+        const sel = document.createElement('select');
+        Object.entries(THEMES).forEach(([k, v]) => {
+            const o = document.createElement('option');
+            o.value = k; o.textContent = v.label;
+            if (k === this.prefs.theme) o.selected = true;
+            sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => {
+            this.prefs.theme = sel.value; this.savePrefs(); this.applyPrefs();
+        });
+        themeRow.appendChild(sel);
+
+        const fontRow = document.createElement('div');
+        fontRow.className = 'settings-row';
+        fontRow.innerHTML = '<label>Font size</label>';
+        const range = document.createElement('input');
+        range.type = 'range'; range.min = 10; range.max = 24; range.value = this.prefs.fontSize;
+        const val = document.createElement('span');
+        val.className = 'settings-val'; val.textContent = this.prefs.fontSize + 'px';
+        range.addEventListener('input', () => {
+            this.prefs.fontSize = parseInt(range.value, 10);
+            val.textContent = range.value + 'px';
+            this.savePrefs(); this.applyPrefs();
+        });
+        fontRow.appendChild(range); fontRow.appendChild(val);
+
+        const close = document.createElement('button');
+        close.className = 'overlay-close'; close.textContent = 'Done';
+        close.addEventListener('click', () => this.closeOverlays());
+
+        panel.appendChild(themeRow);
+        panel.appendChild(fontRow);
+        panel.appendChild(close);
+        overlay.appendChild(panel);
+    }
+
+    // --- Command palette ---
+
+    openPalette() {
+        this.closeOverlays();
+        const overlay = this.makeOverlay('palette-overlay');
+        const panel = document.createElement('div');
+        panel.className = 'palette-panel';
+        const input = document.createElement('input');
+        input.className = 'palette-input';
+        input.placeholder = 'Type a command or session…';
+        const list = document.createElement('div');
+        list.className = 'palette-list';
+        panel.appendChild(input);
+        panel.appendChild(list);
+        overlay.appendChild(panel);
+
+        const commands = this.paletteCommands();
+        let filtered = commands;
+        let active = 0;
+
+        const render = () => {
+            list.innerHTML = '';
+            filtered.forEach((cmd, i) => {
+                const row = document.createElement('div');
+                row.className = 'palette-item' + (i === active ? ' active' : '');
+                row.textContent = cmd.label;
+                row.addEventListener('click', () => { this.closeOverlays(); cmd.run(); });
+                list.appendChild(row);
+            });
+        };
+        input.addEventListener('input', () => {
+            const q = input.value.toLowerCase();
+            filtered = commands.filter(c => c.label.toLowerCase().includes(q));
+            active = 0;
+            render();
+        });
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') { active = Math.min(active + 1, filtered.length - 1); render(); e.preventDefault(); }
+            else if (e.key === 'ArrowUp') { active = Math.max(active - 1, 0); render(); e.preventDefault(); }
+            else if (e.key === 'Enter') { if (filtered[active]) { this.closeOverlays(); filtered[active].run(); } }
+            else if (e.key === 'Escape') { this.closeOverlays(); }
+            e.stopPropagation();
+        });
+        render();
+        setTimeout(() => input.focus(), 0);
+    }
+
+    paletteCommands() {
+        const cmds = [
+            { label: 'New session', run: () => this.createSession() },
+            { label: 'Settings', run: () => this.openSettings() },
+            { label: 'Add server', run: () => this.addServer() },
+            { label: 'Next session', run: () => this.cycleSession(1) },
+            { label: 'Previous session', run: () => this.cycleSession(-1) },
+        ];
+        Object.keys(THEMES).forEach(k => cmds.push({
+            label: 'Theme: ' + THEMES[k].label,
+            run: () => { this.prefs.theme = k; this.savePrefs(); this.applyPrefs(); },
+        }));
+        this.sessionListEl.querySelectorAll('.session-item').forEach(el => {
+            const nameEl = el.querySelector('.session-name');
+            const sid = el.dataset.sessionId, srv = el.dataset.serverId;
+            cmds.push({ label: 'Go to: ' + (nameEl ? nameEl.textContent : sid), run: () => this.connectToSession(srv, sid) });
+        });
+        return cmds;
+    }
+
+    cycleSession(dir) {
+        const items = Array.from(this.sessionListEl.querySelectorAll('.session-item'));
+        if (!items.length) return;
+        let idx = items.findIndex(el =>
+            el.dataset.serverId === this.currentServerId && el.dataset.sessionId === this.currentSessionId);
+        if (idx < 0) idx = dir > 0 ? 0 : items.length - 1;
+        else idx = (idx + dir + items.length) % items.length;
+        const el = items[idx];
+        this.connectToSession(el.dataset.serverId, el.dataset.sessionId);
+    }
+
+    handleGlobalKeys(e) {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+            e.preventDefault(); e.stopPropagation();
+            this.openPalette();
+            return;
+        }
+        if (e.ctrlKey && e.shiftKey) {
+            if (e.code === 'BracketRight') { e.preventDefault(); e.stopPropagation(); this.cycleSession(1); }
+            else if (e.code === 'BracketLeft') { e.preventDefault(); e.stopPropagation(); this.cycleSession(-1); }
+            else if (e.code === 'KeyN') { e.preventDefault(); e.stopPropagation(); this.createSession(); }
+        }
     }
 
     // --- Utilities ---
