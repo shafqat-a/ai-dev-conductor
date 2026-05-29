@@ -46,6 +46,7 @@ func main() {
 	}
 
 	sessionStore := auth.NewSessionStore()
+	loginLimiter := auth.NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindow, cfg.LoginLockout)
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
@@ -76,7 +77,7 @@ func main() {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		tmpl.ExecuteTemplate(w, "login.html", nil)
 	})
-	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, cfg.SessionTimeout))
+	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, loginLimiter, cfg.SessionTimeout))
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
