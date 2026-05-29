@@ -48,6 +48,21 @@ All settings via environment variables:
 | `AI_CONDUCTOR_SHELL` | auto-detected | Shell binary path |
 | `AI_CONDUCTOR_PID_FILE` | *(none)* | PID file path |
 | `AI_CONDUCTOR_SESSION_TIMEOUT` | `24h` | Auth session expiry |
+| `AI_CONDUCTOR_LOGIN_MAX_ATTEMPTS` | `5` | Failed logins per IP before lockout (`0` disables throttling) |
+| `AI_CONDUCTOR_LOGIN_WINDOW` | `1m` | Window in which failures are counted |
+| `AI_CONDUCTOR_LOGIN_LOCKOUT` | `1m` | Base lockout, doubling per repeat offence (capped at 16×) |
+
+### Login brute-force protection
+
+Failed logins are rate-limited per client IP (resolved from `X-Forwarded-For`
+when behind a trusted proxy, else the connection address). After
+`LOGIN_MAX_ATTEMPTS` failures within `LOGIN_WINDOW`, the IP is locked out for an
+exponentially increasing duration and `/api/login` returns `429` with a
+`Retry-After` header. Each failure logs a fail2ban-friendly line:
+
+```
+auth: failed login attempt, ip=<ip>
+```
 
 ## Architecture
 

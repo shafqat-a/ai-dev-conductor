@@ -44,6 +44,7 @@ func main() {
 	}
 
 	sessionStore := auth.NewSessionStore()
+	loginLimiter := auth.NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindow, cfg.LoginLockout)
 	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir)
 
 	// Parse templates — use fs.Sub to strip prefix so template names are just "login.html" etc.
@@ -65,7 +66,7 @@ func main() {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		tmpl.ExecuteTemplate(w, "login.html", nil)
 	})
-	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, cfg.SessionTimeout))
+	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, loginLimiter, cfg.SessionTimeout))
 
 	// Protected routes
 	r.Group(func(r chi.Router) {

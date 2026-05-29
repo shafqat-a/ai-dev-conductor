@@ -2,7 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"log"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,8 +21,19 @@ func HandleHealthCheck() http.HandlerFunc {
 	}
 }
 
-func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, sessionTimeout time.Duration) http.HandlerFunc {
+func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, limiter *auth.RateLimiter, sessionTimeout time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+
+		// Reject early if this client is locked out from too many failures.
+		if ok, retryAfter := limiter.Allowed(ip); !ok {
+			secs := int(retryAfter.Seconds()) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			log.Printf("auth: login throttled, ip=%s retry_after=%ds", ip, secs)
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try again later"})
+			return
+		}
+
 		var req struct {
 			Password string `json:"password"`
 		}
@@ -28,9 +43,15 @@ func HandleLogin(authSvc *auth.AuthService, store *auth.SessionStore, sessionTim
 		}
 
 		if !authSvc.VerifyPassword(req.Password) {
+			limiter.RecordFailure(ip)
+			// Structured, fail2ban-friendly line.
+			log.Printf("auth: failed login attempt, ip=%s", ip)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
 			return
 		}
+
+		// Success — clear any accumulated failure state for this client.
+		limiter.Reset(ip)
 
 		token, err := auth.GenerateSessionToken()
 		if err != nil {
@@ -103,6 +124,21 @@ func HandleDeleteSession(mgr *session.Manager) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 	}
+}
+
+// clientIP resolves the originating client address. The app sits behind our
+// own nginx, so trust the first hop in X-Forwarded-For when present; otherwise
+// fall back to the connection's RemoteAddr.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if first := strings.TrimSpace(strings.SplitN(xff, ",", 2)[0]); first != "" {
+			return first
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
