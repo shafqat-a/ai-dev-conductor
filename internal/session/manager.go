@@ -5,23 +5,44 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/shafqat-a/ai-dev-conductor/internal/store"
 )
+
+// flushInterval is how often live-session activity/size is persisted.
+const flushInterval = 15 * time.Second
 
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	shell    string
 	dataDir  string
+
+	store     *store.Store
+	stopFlush chan struct{}
 }
 
-func NewManager(shell, dataDir string) *Manager {
-	return &Manager{
-		sessions: make(map[string]*Session),
-		shell:    shell,
-		dataDir:  dataDir,
+// NewManager wires the live-session map to the persistent metadata store. Any
+// row left as "running" by a previous process is reconciled to "detached",
+// since a fresh process owns no live PTYs (until session-survival lands).
+func NewManager(shell, dataDir string, st *store.Store) *Manager {
+	m := &Manager{
+		sessions:  make(map[string]*Session),
+		shell:     shell,
+		dataDir:   dataDir,
+		store:     st,
+		stopFlush: make(chan struct{}),
 	}
+	if st != nil {
+		if err := st.MarkAllDetached(); err != nil {
+			log.Printf("store: reconcile on startup: %v", err)
+		}
+		go m.flushLoop()
+	}
+	return m
 }
 
 func (m *Manager) Create(name string) (*Session, error) {
@@ -41,12 +62,40 @@ func (m *Manager) Create(name string) (*Session, error) {
 		m.mu.Unlock()
 		if exists {
 			log.Printf("session %s: auto-removed (process exited)", sessionID)
+			m.setStatus(sessionID, store.StatusDead)
+		}
+	}
+	s.OnClientsEmpty = func(sessionID string) {
+		if m.store != nil {
+			if err := m.store.SetClientDisconnect(sessionID, time.Now().Unix()); err != nil {
+				log.Printf("store: set client-disconnect for %s: %v", sessionID, err)
+			}
+		}
+	}
+	s.OnClientsAttach = func(sessionID string) {
+		// 0 marks "currently attached / active" so the reaper (M2b) ignores it.
+		if m.store != nil {
+			if err := m.store.SetClientDisconnect(sessionID, 0); err != nil {
+				log.Printf("store: clear client-disconnect for %s: %v", sessionID, err)
+			}
 		}
 	}
 
 	m.mu.Lock()
 	m.sessions[id] = s
 	m.mu.Unlock()
+
+	if m.store != nil {
+		if err := m.store.Upsert(store.SessionMeta{
+			ID:             s.ID,
+			Name:           s.GetName(),
+			CreatedAt:      s.CreatedAt.Unix(),
+			LastActivityAt: s.LastActivity(),
+			Status:         store.StatusRunning,
+		}); err != nil {
+			log.Printf("store: upsert new session %s: %v", id, err)
+		}
+	}
 
 	return s, nil
 }
@@ -59,26 +108,92 @@ func (m *Manager) Get(id string) (*Session, bool) {
 }
 
 type SessionInfo struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"createdAt"`
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	CreatedAt              string `json:"createdAt"`
+	Status                 string `json:"status"`
+	LastActivityAt         int64  `json:"lastActivityAt"`
+	LastClientDisconnectAt int64  `json:"lastClientDisconnectAt,omitempty"`
+	Cols                   int    `json:"cols,omitempty"`
+	Rows                   int    `json:"rows,omitempty"`
 }
 
+const timeLayout = "2006-01-02 15:04:05"
+
+// List returns the merged view: every persisted row, overlaid with live state
+// for sessions whose shell is running in this process.
 func (m *Manager) List() []SessionInfo {
+	// Without a store we can only report live sessions.
+	if m.store == nil {
+		return m.listLiveOnly()
+	}
+
+	rows, err := m.store.List()
+	if err != nil {
+		log.Printf("store: list: %v", err)
+		return m.listLiveOnly()
+	}
+
+	m.mu.RLock()
+	live := make(map[string]*Session, len(m.sessions))
+	for id, s := range m.sessions {
+		live[id] = s
+	}
+	m.mu.RUnlock()
+
+	list := make([]SessionInfo, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		seen[r.ID] = struct{}{}
+		info := SessionInfo{
+			ID:                     r.ID,
+			Name:                   r.Name,
+			CreatedAt:              time.Unix(r.CreatedAt, 0).Format(timeLayout),
+			Status:                 string(r.Status),
+			LastActivityAt:         r.LastActivityAt,
+			LastClientDisconnectAt: r.LastClientDisconnectAt,
+			Cols:                   r.Cols,
+			Rows:                   r.Rows,
+		}
+		if s, ok := live[r.ID]; ok {
+			info.Name = s.GetName()
+			info.Status = string(store.StatusRunning)
+			info.LastActivityAt = s.LastActivity()
+		}
+		list = append(list, info)
+	}
+	// Include any live session not yet reflected in the store (race safety).
+	for id, s := range live {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		list = append(list, SessionInfo{
+			ID:             id,
+			Name:           s.GetName(),
+			CreatedAt:      s.CreatedAt.Format(timeLayout),
+			Status:         string(store.StatusRunning),
+			LastActivityAt: s.LastActivity(),
+		})
+	}
+
+	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt < list[j].CreatedAt })
+	return list
+}
+
+func (m *Manager) listLiveOnly() []SessionInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	list := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		list = append(list, SessionInfo{
-			ID:        s.ID,
-			Name:      s.GetName(),
-			CreatedAt: s.CreatedAt.Format("2006-01-02 15:04:05"),
+			ID:             s.ID,
+			Name:           s.GetName(),
+			CreatedAt:      s.CreatedAt.Format(timeLayout),
+			Status:         string(store.StatusRunning),
+			LastActivityAt: s.LastActivity(),
 		})
 	}
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].CreatedAt < list[j].CreatedAt
-	})
+	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt < list[j].CreatedAt })
 	return list
 }
 
@@ -87,35 +202,128 @@ func (m *Manager) Rename(id, name string) error {
 	s, ok := m.sessions[id]
 	m.mu.RUnlock()
 	if !ok {
+		// Allow renaming a persisted-but-detached session too.
+		if m.store != nil {
+			if err := m.store.SetName(id, name); err == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("session %s not found", id)
 	}
 	s.SetName(name)
+	if m.store != nil {
+		if err := m.store.SetName(id, name); err != nil {
+			log.Printf("store: rename %s: %v", id, err)
+		}
+	}
 	return nil
 }
 
+// Delete removes a session. It closes the live shell if present and always
+// clears persisted metadata + history, so detached rows can be cleaned up.
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
-	s, ok := m.sessions[id]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("session %s not found", id)
+	s, live := m.sessions[id]
+	if live {
+		delete(m.sessions, id)
 	}
-	delete(m.sessions, id)
 	m.mu.Unlock()
 
-	s.Close()
+	persisted := false
+	if m.store != nil {
+		if rows, err := m.store.List(); err == nil {
+			for _, r := range rows {
+				if r.ID == id {
+					persisted = true
+					break
+				}
+			}
+		}
+	}
+
+	if !live && !persisted {
+		return fmt.Errorf("session %s not found", id)
+	}
+
+	if live {
+		s.Close()
+	}
+	if m.store != nil {
+		if err := m.store.Delete(id); err != nil {
+			log.Printf("store: delete %s: %v", id, err)
+		}
+	}
+	RemoveHistory(m.dataDir, id)
 	return nil
 }
 
 func (m *Manager) CloseAll() {
+	if m.stopFlush != nil {
+		select {
+		case <-m.stopFlush: // already closed
+		default:
+			close(m.stopFlush)
+		}
+	}
+	m.flush() // persist final activity before tearing down
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, s := range m.sessions {
 		s.Close()
+		m.setStatus(id, store.StatusDetached)
 		delete(m.sessions, id)
 	}
 }
 
 func (m *Manager) DataDir() string {
 	return m.dataDir
+}
+
+func (m *Manager) setStatus(id string, status store.Status) {
+	if m.store == nil {
+		return
+	}
+	if err := m.store.SetStatus(id, status); err != nil {
+		log.Printf("store: set status %s=%s: %v", id, status, err)
+	}
+}
+
+// flushLoop periodically persists live-session activity, size, and status.
+func (m *Manager) flushLoop() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopFlush:
+			return
+		case <-ticker.C:
+			m.flush()
+		}
+	}
+}
+
+func (m *Manager) flush() {
+	if m.store == nil {
+		return
+	}
+	m.mu.RLock()
+	snapshot := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		snapshot = append(snapshot, s)
+	}
+	m.mu.RUnlock()
+
+	for _, s := range snapshot {
+		// Targeted updates (not a full Upsert) so we never clobber
+		// last_client_disconnect_at, which is owned by the attach/detach path.
+		if err := m.store.SetActivity(s.ID, s.LastActivity()); err != nil {
+			log.Printf("store: flush activity %s: %v", s.ID, err)
+		}
+		if cols, rows := s.Size(); cols > 0 && rows > 0 {
+			if err := m.store.SetSize(s.ID, int(cols), int(rows)); err != nil {
+				log.Printf("store: flush size %s: %v", s.ID, err)
+			}
+		}
+	}
 }

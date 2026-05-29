@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/shafqat-a/ai-dev-conductor/config"
 	"github.com/shafqat-a/ai-dev-conductor/internal/auth"
 	"github.com/shafqat-a/ai-dev-conductor/internal/session"
+	"github.com/shafqat-a/ai-dev-conductor/internal/store"
 	"github.com/shafqat-a/ai-dev-conductor/internal/ws"
 )
 
@@ -45,7 +47,16 @@ func main() {
 
 	sessionStore := auth.NewSessionStore()
 	loginLimiter := auth.NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindow, cfg.LoginLockout)
-	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir)
+
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		log.Fatalf("data dir: %v", err)
+	}
+	metaStore, err := store.Open(filepath.Join(cfg.DataDir, "state.db"))
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+
+	sessionMgr := session.NewManager(cfg.Shell, cfg.DataDir, metaStore)
 
 	// Parse templates — use fs.Sub to strip prefix so template names are just "login.html" etc.
 	templateSub, _ := fs.Sub(templateFS, "web/templates")
@@ -119,6 +130,9 @@ func main() {
 
 	log.Println("Shutting down...")
 	sessionMgr.CloseAll()
+	if err := metaStore.Close(); err != nil {
+		log.Printf("store: close: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

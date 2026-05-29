@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -21,13 +22,23 @@ type Session struct {
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
 
-	mu            sync.Mutex
-	ptmx          *os.File
-	cmd           *exec.Cmd
-	clients       map[*Client]struct{}
-	historyFile   *os.File
-	done          chan struct{}
+	mu          sync.Mutex
+	ptmx        *os.File
+	cmd         *exec.Cmd
+	clients     map[*Client]struct{}
+	historyFile *os.File
+	done        chan struct{}
+	cols, rows  uint16 // last known terminal size
+
+	// lastActivity is the unix-seconds time of the most recent PTY output.
+	// Atomic so readPTY can update it on the hot path without taking mu.
+	lastActivity atomic.Int64
+
 	OnProcessExit func(id string)
+	// OnClientsEmpty fires when the last attached client disconnects.
+	OnClientsEmpty func(id string)
+	// OnClientsAttach fires when the first client attaches (0 -> 1).
+	OnClientsAttach func(id string)
 }
 
 func NewSession(id, name, shell, dataDir string) (*Session, error) {
@@ -60,6 +71,7 @@ func NewSession(id, name, shell, dataDir string) (*Session, error) {
 		historyFile: hf,
 		done:        make(chan struct{}),
 	}
+	s.lastActivity.Store(s.CreatedAt.Unix())
 
 	go s.readPTY()
 	go s.waitProcess()
@@ -77,6 +89,8 @@ func (s *Session) readPTY() {
 		}
 		data := make([]byte, n)
 		copy(data, buf[:n])
+
+		s.lastActivity.Store(time.Now().Unix())
 
 		// Write to history
 		if s.historyFile != nil {
@@ -118,8 +132,13 @@ func (s *Session) AddClient() *Client {
 		done: make(chan struct{}),
 	}
 	s.mu.Lock()
+	first := len(s.clients) == 0
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
+
+	if first && s.OnClientsAttach != nil {
+		s.OnClientsAttach(s.ID)
+	}
 	return c
 }
 
@@ -127,8 +146,13 @@ func (s *Session) AddClient() *Client {
 func (s *Session) RemoveClient(c *Client) {
 	s.mu.Lock()
 	delete(s.clients, c)
+	empty := len(s.clients) == 0
 	s.mu.Unlock()
 	close(c.done)
+
+	if empty && s.OnClientsEmpty != nil {
+		s.OnClientsEmpty(s.ID)
+	}
 }
 
 // Output returns the channel that receives PTY output for this client.
@@ -147,7 +171,22 @@ func (s *Session) WriteInput(data []byte) error {
 }
 
 func (s *Session) Resize(rows, cols uint16) error {
+	s.mu.Lock()
+	s.rows, s.cols = rows, cols
+	s.mu.Unlock()
 	return pty.Setsize(s.ptmx, &pty.Winsize{Rows: rows, Cols: cols})
+}
+
+// LastActivity returns the unix-seconds time of the most recent PTY output.
+func (s *Session) LastActivity() int64 {
+	return s.lastActivity.Load()
+}
+
+// Size returns the last known terminal dimensions (cols, rows).
+func (s *Session) Size() (cols, rows uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cols, s.rows
 }
 
 func (s *Session) SessionDone() <-chan struct{} {
