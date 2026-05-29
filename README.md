@@ -15,6 +15,7 @@ A web-based terminal session manager written in Go. Provides password-protected,
 - **Mobile-friendly** — On-screen Esc/Tab/Ctrl/arrow keys and a slide-in sidebar on small screens
 - **Auto-reconnect** — Exponential backoff reconnection on connection loss
 - **Authentication** — Bcrypt password hashing with session tokens (cookie + header)
+- **Read-only share links** — Mint a time-boxed public link (`/s/{token}`) that lets anyone watch a session live without controlling it; read-only is enforced server-side, and links can be revoked
 - **Production-ready** — Systemd service, health checks, graceful shutdown, dead session cleanup
 
 ## Quick Start
@@ -57,6 +58,8 @@ All settings via environment variables:
 | `AI_CONDUCTOR_LOGIN_LOCKOUT` | `1m` | Base lockout, doubling per repeat offence (capped at 16×) |
 | `AI_CONDUCTOR_IDLE_TIMEOUT` | *(off)* | Reap sessions with no clients for this long (e.g. `2h`); `0` disables |
 | `AI_CONDUCTOR_MAX_SESSIONS` | *(unlimited)* | Cap on concurrent live sessions; `0` is unlimited |
+| `AI_CONDUCTOR_PUBLIC_URL` | *(request origin)* | External base URL (e.g. `https://host`) used to build absolute share-link URLs |
+| `AI_CONDUCTOR_SHARE_TTL` | `24h` | Default lifetime of a minted share link (capped at 30 days) |
 
 ### Login brute-force protection
 
@@ -104,7 +107,12 @@ main.go                    Entry point, HTTP server, routing (chi)
 | `POST` | `/api/sessions` | Yes | Create new session |
 | `PUT` | `/api/sessions/{id}` | Yes | Rename session |
 | `DELETE` | `/api/sessions/{id}` | Yes | Delete session |
+| `POST` | `/api/sessions/{id}/share` | Yes | Mint a read-only share link (raw token returned once); optional body `{"ttlSeconds": N}` |
+| `GET` | `/api/sessions/{id}/shares` | Yes | List a session's share links (metadata only) |
+| `DELETE` | `/api/shares/{id}` | Yes | Revoke a share link by its public id |
 | `GET` | `/ws/{id}` | Yes | WebSocket terminal connection |
+| `GET` | `/s/{token}` | No | Public read-only viewer page for a share link |
+| `GET` | `/ws/share/{token}` | No | Public read-only WebSocket attach (input dropped server-side) |
 
 ## WebSocket Protocol
 

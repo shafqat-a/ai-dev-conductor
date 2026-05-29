@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -51,11 +52,66 @@ func HandleWebSocket(mgr *session.Manager) http.HandlerFunc {
 		}
 
 		go writePump(conn, client)
-		go readPump(conn, sess, client, mgr.DataDir())
+		go readPump(conn, sess, client, mgr.DataDir(), false)
 	}
 }
 
-func readPump(conn *websocket.Conn, sess *session.Session, client *session.Client, dataDir string) {
+// HandleShareWebSocket is the public, unauthenticated attach endpoint for a
+// read-only share link. The raw token comes from the URL; we resolve it to a
+// live session via the store. The connection is read-only: input/resize/paste
+// frames are dropped server-side (UI-only read-only would be a security hole).
+func HandleShareWebSocket(mgr *session.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st := mgr.Store()
+		if st == nil {
+			http.Error(w, "sharing unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		token := chi.URLParam(r, "token")
+		sum := sha256.Sum256([]byte(token))
+		sessionID, _, ok, err := st.RedeemShare(sum[:], time.Now().Unix())
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "share link invalid or expired", http.StatusNotFound)
+			return
+		}
+
+		sess, live := mgr.Get(sessionID)
+		if !live {
+			http.Error(w, "session not running", http.StatusNotFound)
+			return
+		}
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("websocket upgrade (share): %v", err)
+			return
+		}
+
+		client := sess.AddClient()
+		log.Printf("read-only viewer connected to session %s", sessionID)
+
+		history, err := session.ReadHistory(mgr.DataDir(), sessionID)
+		if err == nil && len(history) > 0 {
+			msg := Message{Type: MessageTypeOutput, Data: string(history)}
+			if payload, err := json.Marshal(msg); err == nil {
+				conn.WriteMessage(websocket.TextMessage, payload)
+			}
+		}
+
+		go writePump(conn, client)
+		go readPump(conn, sess, client, mgr.DataDir(), true)
+	}
+}
+
+// readPump pumps client→server frames. When readOnly is true the session is
+// never written to: input, resize, and paste frames are ignored (the connection
+// is still read so we observe pongs and the close handshake).
+func readPump(conn *websocket.Conn, sess *session.Session, client *session.Client, dataDir string, readOnly bool) {
 	defer func() {
 		sess.RemoveClient(client)
 		conn.Close()
@@ -72,6 +128,12 @@ func readPump(conn *websocket.Conn, sess *session.Session, client *session.Clien
 		msgType, raw, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		// Read-only viewers (share links) may not drive the PTY. We still
+		// consume their frames so pongs and the close handshake are handled.
+		if readOnly {
+			continue
 		}
 
 		// Binary messages are raw PTY input (e.g. image paste)

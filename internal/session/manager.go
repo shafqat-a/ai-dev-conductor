@@ -131,6 +131,12 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return s, ok
 }
 
+// Store returns the persistent metadata store (may be nil if persistence is
+// disabled). Used by share-link handlers to mint/redeem/revoke tokens.
+func (m *Manager) Store() *store.Store {
+	return m.store
+}
+
 type SessionInfo struct {
 	ID                     string `json:"id"`
 	Name                   string `json:"name"`

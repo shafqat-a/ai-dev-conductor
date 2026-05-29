@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,12 @@ type Config struct {
 	Shell          string
 	SessionTimeout time.Duration
 	PIDFile        string
+
+	// PublicURL is the externally-reachable base URL (e.g. https://host) used to
+	// build absolute share-link URLs. Empty falls back to the request's origin.
+	PublicURL string
+	// ShareTTL is the default lifetime of a freshly-minted share link.
+	ShareTTL time.Duration
 
 	// Login brute-force protection. LoginMaxAttempts <= 0 disables it.
 	LoginMaxAttempts int
@@ -39,6 +46,8 @@ func Load() (*Config, error) {
 		LoginLockout:     envDuration("AI_CONDUCTOR_LOGIN_LOCKOUT", time.Minute),
 		IdleTimeout:      envDuration("AI_CONDUCTOR_IDLE_TIMEOUT", 0),
 		MaxSessions:      envInt("AI_CONDUCTOR_MAX_SESSIONS", 0),
+		PublicURL:        strings.TrimRight(os.Getenv("AI_CONDUCTOR_PUBLIC_URL"), "/"),
+		ShareTTL:         envDuration("AI_CONDUCTOR_SHARE_TTL", 24*time.Hour),
 	}
 
 	if cfg.Shell == "" {

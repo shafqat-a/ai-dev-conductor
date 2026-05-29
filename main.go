@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"html/template"
@@ -79,6 +80,27 @@ func main() {
 	})
 	r.Post("/api/login", api.HandleLogin(authSvc, sessionStore, loginLimiter, cfg.SessionTimeout))
 
+	// Public read-only share link: viewer page + its unauthenticated WS attach.
+	// The token in the URL is the only secret; both routes validate it server-side.
+	r.Get("/s/{token}", func(w http.ResponseWriter, r *http.Request) {
+		token := chi.URLParam(r, "token")
+		st := sessionMgr.Store()
+		valid := false
+		if st != nil {
+			sum := sha256.Sum256([]byte(token))
+			if _, _, ok, err := st.RedeemShare(sum[:], time.Now().Unix()); err == nil && ok {
+				valid = true
+			}
+		}
+		if !valid {
+			w.WriteHeader(http.StatusNotFound)
+			tmpl.ExecuteTemplate(w, "share_invalid.html", nil)
+			return
+		}
+		tmpl.ExecuteTemplate(w, "share.html", nil)
+	})
+	r.Get("/ws/share/{token}", ws.HandleShareWebSocket(sessionMgr))
+
 	// Protected routes
 	r.Group(func(r chi.Router) {
 		r.Use(auth.RequireAuth(sessionStore))
@@ -91,6 +113,9 @@ func main() {
 		r.Post("/api/sessions", api.HandleCreateSession(sessionMgr))
 		r.Put("/api/sessions/{id}", api.HandleRenameSession(sessionMgr))
 		r.Delete("/api/sessions/{id}", api.HandleDeleteSession(sessionMgr))
+		r.Post("/api/sessions/{id}/share", api.HandleMintShare(sessionMgr, cfg.PublicURL, cfg.ShareTTL))
+		r.Get("/api/sessions/{id}/shares", api.HandleListShares(sessionMgr))
+		r.Delete("/api/shares/{id}", api.HandleRevokeShare(sessionMgr))
 		r.Get("/ws/{id}", ws.HandleWebSocket(sessionMgr))
 	})
 
