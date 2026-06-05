@@ -45,6 +45,9 @@ func main() {
 		log.Fatalf("auth: %v", err)
 	}
 
+	// Log the API key on startup so it can be captured for programmatic use.
+	log.Printf("API key: %s", cfg.ApiKey)
+
 	sessionStore := auth.NewSessionStore()
 	loginLimiter := auth.NewRateLimiter(cfg.LoginMaxAttempts, cfg.LoginWindow, cfg.LoginLockout)
 
@@ -81,7 +84,7 @@ func main() {
 
 	// Protected routes
 	r.Group(func(r chi.Router) {
-		r.Use(auth.RequireAuth(sessionStore))
+		r.Use(auth.RequireAuth(sessionStore, cfg.ApiKey))
 
 		r.Get("/terminal", func(w http.ResponseWriter, r *http.Request) {
 			tmpl.ExecuteTemplate(w, "terminal.html", nil)
@@ -91,6 +94,8 @@ func main() {
 		r.Post("/api/sessions", api.HandleCreateSession(sessionMgr))
 		r.Put("/api/sessions/{id}", api.HandleRenameSession(sessionMgr))
 		r.Delete("/api/sessions/{id}", api.HandleDeleteSession(sessionMgr))
+		r.Post("/api/sessions/{id}/exec", api.HandleExecCommand(sessionMgr))
+		r.Get("/api/sessions/{id}/history", api.HandleSessionHistory(sessionMgr))
 		r.Get("/ws/{id}", ws.HandleWebSocket(sessionMgr))
 	})
 

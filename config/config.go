@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +17,10 @@ type Config struct {
 	Shell          string
 	SessionTimeout time.Duration
 	PIDFile        string
+
+	// ApiKey authenticates programmatic API clients via the X-API-Key header.
+	// Sourced from AI_CONDUCTOR_API_KEY, or auto-generated (and logged) if unset.
+	ApiKey string
 
 	// Login brute-force protection. LoginMaxAttempts <= 0 disables it.
 	LoginMaxAttempts int
@@ -45,6 +51,15 @@ func Load() (*Config, error) {
 		cfg.Shell = detectShell()
 	}
 
+	cfg.ApiKey = os.Getenv("AI_CONDUCTOR_API_KEY")
+	if cfg.ApiKey == "" {
+		key, err := generateAPIKey()
+		if err != nil {
+			return nil, fmt.Errorf("generate api key: %w", err)
+		}
+		cfg.ApiKey = key
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -66,6 +81,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("shell %q not found: %w", c.Shell, err)
 	}
 	return nil
+}
+
+// generateAPIKey returns a random 32-byte key, hex-encoded.
+func generateAPIKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func detectShell() string {
